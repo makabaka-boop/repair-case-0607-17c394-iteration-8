@@ -60,6 +60,7 @@ function collisionResult(intervalStart: number): PrecheckResponse {
       },
     ],
     compound_intrusion_segments: [],
+  sleeves: [],
   };
 }
 

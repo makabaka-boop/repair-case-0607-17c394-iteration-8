@@ -24,6 +24,16 @@ A=[0,5]、B=[5,10] 在 5 保留双圈零长点；A=[0,10]、B=[2,8]、C=[8,12] �
 
 长路径性能：候选对先经 x 扫描线 + y 包围盒粗筛（不漏候选，比较带与坐标
 尺度匹配的容差以保住数值相切），只对粗筛命中的组合做精确求交。
+
+可选**接头套管**（:class:`Sleeve`）：沿累计里程的非空闭区间
+``[start_mileage, end_mileage]`` 内外半径更大。几何层不新增折线，而是在
+**未舍入里程处概念拆开**受影响原线段——对每个「原线段 × 禁入圈」分别在
+套管段（用扩张半径 = 圈半径 + 套管外半径）与两侧普通段（圈半径 + 电缆
+半径）上求闭交集，再按并集语义合并：边界点一律按较大半径裁决，拆段
+绝不重复计数同一碰撞（每对「原线段 × 禁入圈」至多一条 :class:`Collision`），
+但同一段上因“套管外、套管内、套管外”半径差产生的**互不相连侵入分量**
+会保留为多个片段。命中的坐标、**原线段编号**与累计里程映回同一套侵入
+区间/复合侵入结果，区间合并、复合扫描与三位展示链路完全复用。
 """
 
 from __future__ import annotations
@@ -118,6 +128,21 @@ class CompoundIntrusionSegment:
     end_inclusive: bool
     length: float
     pieces: Tuple[CompoundPiece, ...]
+
+
+@dataclass(frozen=True)
+class Sleeve:
+    """一小段更粗的接头套管（沿原路径累计里程的闭区间，未舍入双精度）。
+
+    ``start_mileage < end_mileage``、区间位于路径内、
+    ``outer_radius >= cable_radius`` 由上层（schemas/main）保证。
+    套管只改变该里程段的电缆外半径：扩张半径 = 禁入圈半径 + 套管外半径；
+    套管边界点（恰落在 start/end 里程上的点）按较大半径裁决（闭集）。
+    """
+
+    start_mileage: float
+    end_mileage: float
+    outer_radius: float
 
 
 def cumulative_mileage(nodes: Sequence[Point]) -> List[float]:
@@ -247,6 +272,63 @@ def segment_disk_interval(
     return None
 
 
+def _clip_disk_interval(
+    tv: Tuple[float, float],
+    u0: float,
+    u1: float,
+) -> Optional[Tuple[float, float]]:
+    """把整段与闭圆盘的交集参数区间 ``tv`` 裁剪到子段参数窗 [u0, u1]。
+
+    边界按闭集处理：窗端点上的点属于子段（套管边界点按较大半径裁决即
+    依赖此闭集裁剪）；裁剪结果为零长（窗端点恰为切点/交点）时保留
+    ``t0 == t1`` 的零长点；窗与交集不相交返回 None。
+    """
+    lo = tv[0] if tv[0] > u0 else u0
+    hi = tv[1] if tv[1] < u1 else u1
+    if lo <= hi:
+        return (lo, hi)
+    return None
+
+
+def _sleeve_cuts_on_segment(
+    seg_start: float,
+    seg_end: float,
+    sleeves: Sequence[Sleeve],
+) -> List[float]:
+    """落在该线段里程开区间 (seg_start, seg_end) 内的**未舍入**套管边界。
+
+    几何层即在这些里程处“概念拆开”该线段；边界不做任何舍入，恰好压在
+    拐点上的套管边界不产生拆点（拐点本身已分段）。
+    """
+    cuts: List[float] = []
+    for s in sleeves:
+        if seg_start < s.start_mileage < seg_end:
+            cuts.append(s.start_mileage)
+        if seg_start < s.end_mileage < seg_end:
+            cuts.append(s.end_mileage)
+    cuts.sort()
+    return cuts
+
+
+def _sleeve_radius_at(
+    mileage: float,
+    seg_start: float,
+    seg_end: float,
+    sleeves: Sequence[Sleeve],
+    cable_radius: float,
+) -> float:
+    """该里程处的电缆外半径（套管边界按闭集取较大半径）。
+
+    多个套管重叠时取**最粗**外半径（扩张半径随外半径单调，物理占用即
+    所有套管的并集）。
+    """
+    r = cable_radius
+    for s in sleeves:
+        if s.start_mileage <= mileage <= s.end_mileage and s.outer_radius > r:
+            r = s.outer_radius
+    return r
+
+
 def _candidate_pairs(
     nodes: Sequence[Point],
     circles: Sequence[Tuple[Point, float]],
@@ -319,6 +401,93 @@ def _candidate_pairs(
     return pairs
 
 
+def _candidate_pairs_sleeved(
+    nodes: Sequence[Point],
+    circles: Sequence[Tuple[Point, float]],
+    cable_radius: float,
+    sleeves: Sequence[Sleeve],
+    cum: Sequence[float],
+) -> List[Tuple[int, int]]:
+    """含套管的空间粗筛：线段任一部分的有效半径（套管外半径 ≥ 电缆半径）
+    与扩张圈包围盒相交即为候选。
+
+    对每段取“圈半径 + 该段触及的最大外半径”作扩张半径——套管只覆盖
+    线段局部时仍按整段包围盒放宽，粗筛只允许多报，精确求交再按子段
+    半径剔除，绝不漏候选（不漏局部侵入）。
+    """
+    n = len(nodes) - 1
+    m = len(circles)
+    if n <= 0 or m <= 0:
+        return []
+
+    seg_xlo: List[float] = [0.0] * n
+    seg_xhi: List[float] = [0.0] * n
+    seg_ylo: List[float] = [0.0] * n
+    seg_yhi: List[float] = [0.0] * n
+    max_abs = 1.0
+    for i in range(n):
+        ax, ay = nodes[i]
+        bx, by = nodes[i + 1]
+        x0, x1 = (ax, bx) if ax <= bx else (bx, ax)
+        y0, y1 = (ay, by) if ay <= by else (by, ay)
+        seg_xlo[i], seg_xhi[i] = x0, x1
+        seg_ylo[i], seg_yhi[i] = y0, y1
+        max_abs = max(max_abs, abs(ax), abs(ay), abs(bx), abs(by))
+
+    # 每段在其里程范围内触及的最大电缆外半径。
+    seg_radius: List[float] = [cable_radius] * n
+    if sleeves:
+        for i in range(n):
+            r = cable_radius
+            for s in sleeves:
+                # 闭集相交（边界点也算该段触及套管）。
+                if s.start_mileage <= cum[i + 1] and s.end_mileage >= cum[i]:
+                    if s.outer_radius > r:
+                        r = s.outer_radius
+            seg_radius[i] = r
+
+    cir_box: List[Tuple[float, float, float, float]] = []
+    for (center, r) in circles:
+        cx, cy = center
+        cir_box.append((cx - r - cable_radius, cx + r + cable_radius,
+                        cy - r - cable_radius, cy + r + cable_radius))
+        max_abs = max(max_abs, abs(cx) + r, abs(cy) + r, r)
+    eps = 1e-10 * max_abs
+
+    by_xlo = sorted(range(n), key=lambda i: (seg_xlo[i], i))
+    by_xhi = sorted(range(n), key=lambda i: (seg_xhi[i], i))
+    xlo_sorted = [seg_xlo[i] for i in by_xlo]
+    circle_order = sorted(range(m), key=lambda j: (cir_box[j][0], j))
+
+    # 活动集用“全路径最粗外半径”放宽，保证任何更粗子段的线段都已在集合内
+    # （只多报）；逐段再按该段自身最大半径精确复核。
+    extra = max((seg_radius[i] - cable_radius for i in range(n)), default=0.0)
+
+    pairs: List[Tuple[int, int]] = []
+    active: set[int] = set()
+    added = 0
+    removed = 0
+    for j in circle_order:
+        bxlo, bxhi, bylo, byhi = cir_box[j]
+        target = bisect_right(xlo_sorted, bxhi + extra + eps)
+        while added < target:
+            active.add(by_xlo[added])
+            added += 1
+        while removed < n and seg_xhi[by_xhi[removed]] < bxlo - extra - eps:
+            active.discard(by_xhi[removed])
+            removed += 1
+        for i in active:
+            grow = seg_radius[i] - cable_radius
+            if (
+                seg_xlo[i] <= bxhi + grow + eps
+                and seg_xhi[i] >= bxlo - grow - eps
+                and seg_ylo[i] <= byhi + grow + eps
+                and seg_yhi[i] >= bylo - grow - eps
+            ):
+                pairs.append((i, j))
+    return pairs
+
+
 def _build_intervals(pieces: Sequence[SegmentPiece]) -> List[IntrusionInterval]:
     """按禁入圈分组，跨相邻拐点合并，再按 (起始里程, 禁入圈输入序) 排序。"""
     by_circle: dict[int, List[SegmentPiece]] = {}
@@ -331,12 +500,20 @@ def _build_intervals(pieces: Sequence[SegmentPiece]) -> List[IntrusionInterval]:
         for p in ps:
             if current:
                 prev = current[-1]
-                # 仅当：同一 circle（本组天然满足）、线段下标相邻、
-                # 前段以 t1==1 确实到达公共节点、后段以 t0==0 从该节点继续。
+                # 合并两种相接：
+                # 1) 跨拐点：线段下标相邻、前段以 t1==1 到达公共节点、
+                #    后段以 t0==0 从该节点继续；
+                # 2) 同一原线段内首尾参数相接（prev.t1 == p.t0）：套管在
+                #    未舍入里程处拆窗后，边界两侧片段在该点连通（闭集），
+                #    必须合成一个物理区间；互不相接（中间有间隙）的同段
+                #    分量保持独立。
                 joins = (
                     p.segment_index == prev.segment_index + 1
                     and prev.t1 == 1.0
                     and p.t0 == 0.0
+                ) or (
+                    p.segment_index == prev.segment_index
+                    and prev.t1 == p.t0
                 )
             else:
                 joins = False
@@ -643,17 +820,182 @@ def _build_compound_segments(
     return runs
 
 
+def _nearest_on_window(
+    center: Point,
+    a: Point,
+    b: Point,
+    u0: float,
+    u1: float,
+) -> Tuple[Point, float, float]:
+    """圆心到子段参数窗 [u0, u1] 的最近点、距离与线段参数（裁剪到该窗）。"""
+    dx = b[0] - a[0]
+    dy = b[1] - a[1]
+    length_sq = dx * dx + dy * dy
+    if length_sq == 0.0:
+        q: Point = a
+        t = 0.0
+    else:
+        t = ((center[0] - a[0]) * dx + (center[1] - a[1]) * dy) / length_sq
+        if t < u0:
+            t = u0
+        elif t > u1:
+            t = u1
+        q = (a[0] + t * dx, a[1] + t * dy)
+    return q, math.hypot(center[0] - q[0], center[1] - q[1]), t
+
+
+def _window_radius(
+    u0: float,
+    u1: float,
+    seg_start: float,
+    seg_len: float,
+    sleeves: Sequence[Sleeve],
+    cable_radius: float,
+) -> float:
+    """开参数窗 (u0, u1) 内恒定的外半径（取窗中点；窗内不含套管边界）。"""
+    return _sleeve_radius_at(
+        seg_start + 0.5 * (u0 + u1) * seg_len,
+        seg_start, seg_start + seg_len, sleeves, cable_radius,
+    )
+
+
+def _point_radius(
+    t: float,
+    seg_start: float,
+    seg_len: float,
+    sleeves: Sequence[Sleeve],
+    cable_radius: float,
+) -> float:
+    """参数 t 对应里程点上的外半径（套管边界按闭集取最粗）。"""
+    return _sleeve_radius_at(
+        seg_start + t * seg_len,
+        seg_start, seg_start + seg_len, sleeves, cable_radius,
+    )
+
+
+def _solve_segment_circle(
+    a: Point,
+    b: Point,
+    seg_start: float,
+    seg_end: float,
+    center: Point,
+    circle_radius: float,
+    cable_radius: float,
+    sleeves: Sequence[Sleeve],
+) -> Optional[Tuple[List[Tuple[float, float]], Point, float, float]]:
+    """一条原线段与一个扩张圈在**分段半径**下的闭交集（未舍入双精度）。
+
+    在落于线段内的未舍入套管边界处把线段概念切成“开区间窗 + 边界点
+    单元格”（闭集分解，与复合侵入扫描的点态/邻域语义同构）：
+
+    - 每个**开窗** (u_k, u_{k+1}) 内半径恒定（取窗中点），用该扩张半径
+      求整段交集后裁剪回本窗；裁剪得到正长片段时，其内部各点确实在该
+      扩张盘内，端点随闭集保留；
+    - 每个**边界点**（含 t=0、t=1 与每个套管边界，去重）单独按该里程
+      点上的最粗半径（闭集取 max）判定命中，加入零长片段——因此恰好
+      切在套管起止里程上、较小半径不命中的点不会两侧漏判，也不会被
+      任一相邻开窗扩成正长假命中；
+    - 最后把全部片段按并集合并（端点相接即连通），边界零长点只保留一次。
+
+    返回 ``(连通分量[(t0,t1),...], 代表判定点, 距离, 扩张半径)``；
+    每个连通分量对应一个 :class:`SegmentPiece`，同段上“套管外命中—
+    间隙—套管内命中”的互不相连分量各自独立，不因拆段产生重复。
+    代表判定点取**最紧**（distance − expanded_radius 最小、并列取里程
+    最小）的侵入片段最近点，保证报告的 distance ≤ expanded_radius；
+    全部窗与边界点都不相交时返回 None（该「原线段 × 禁入圈」无碰撞）。
+    """
+    seg_len = seg_end - seg_start
+    if seg_len <= 0.0:  # 防御：调用方已拒绝相邻重复节点
+        cuts_m = []
+    else:
+        cuts_m = _sleeve_cuts_on_segment(seg_start, seg_end, sleeves)
+
+    bounds_t: List[float] = [0.0]
+    for m in cuts_m:
+        t = (m - seg_start) / seg_len
+        if t != bounds_t[-1]:  # 不同套管边界恰在同一里程时只拆一次
+            bounds_t.append(t)
+    bounds_t.append(1.0)
+
+    raw: List[Tuple[float, float]] = []
+    best: Optional[Tuple[float, float, Point, float, float]] = None
+
+    def consider(q: Point, d: float, t: float, expanded: float) -> None:
+        nonlocal best
+        gap = d - expanded
+        q_mile = seg_start + t * seg_len
+        key = (gap, q_mile)
+        if best is None or key < (best[0], best[1]):
+            best = (gap, q_mile, q, d, expanded)
+
+    # 1) 开区间窗：中点半径求交并裁剪。
+    for k in range(len(bounds_t) - 1):
+        u0, u1 = bounds_t[k], bounds_t[k + 1]
+        part_radius = _window_radius(
+            u0, u1, seg_start, seg_len, sleeves, cable_radius
+        )
+        expanded = circle_radius + part_radius
+        tv = segment_disk_interval(a, b, center, expanded)
+        if tv is None:
+            continue
+        part = _clip_disk_interval(tv, u0, u1)
+        if part is None:
+            continue
+        # 裁剪后仅在端点零长且该点靠“更大半径的边界单元格”成立时，开窗
+        # 自身不应贡献它（中点半径的闭包已含本窗端点，故开窗在该零长点
+        # 上确实成立时仍可加入——重复零长点由并集合并去重）。
+        raw.append(part)
+        q, d, t = _nearest_on_window(center, a, b, part[0], part[1])
+        consider(q, d, t, expanded)
+
+    # 2) 边界点单元格：逐点按该里程最粗半径闭集裁决（含 t=0、t=1）。
+    dx = b[0] - a[0]
+    dy = b[1] - a[1]
+    for tb in bounds_t:
+        point_radius = _point_radius(
+            tb, seg_start, seg_len, sleeves, cable_radius
+        )
+        expanded = circle_radius + point_radius
+        q = (a[0] + tb * dx, a[1] + tb * dy)
+        d = math.hypot(center[0] - q[0], center[1] - q[1])
+        if d <= expanded:
+            raw.append((tb, tb))
+            consider(q, d, tb, expanded)
+
+    if not raw or best is None:
+        return None
+
+    # 并集合并：片段按参数有序，相接（t1 == 下一 t0，套管边界零长点）或
+    # 数值重叠即连通；不同半径下仅可能在边界点相接，绝不产生正长重复。
+    raw.sort()
+    merged: List[List[float]] = [[raw[0][0], raw[0][1]]]
+    for t0, t1 in raw[1:]:
+        if t0 <= merged[-1][1]:
+            if t1 > merged[-1][1]:
+                merged[-1][1] = t1
+        else:
+            merged.append([t0, t1])
+    parts = [(c0, c1) for c0, c1 in merged]
+    return parts, best[2], best[3], best[4]
+
+
 def analyze_path_full(
     nodes: Sequence[Point],
     circles: Sequence[Tuple[Point, float]],
     cable_radius: float,
+    sleeves: Sequence[Sleeve] = (),
 ) -> Tuple[List[Collision], List[IntrusionInterval], List[CompoundIntrusionSegment]]:
     """一次计算全部碰撞、连续侵入区间与复合侵入段。
 
     排序：碰撞按 (线段下标, 禁入圈输入顺序)；侵入区间按
     (起始累计里程, 禁入圈输入顺序)；复合侵入段按
     (未舍入起始里程, circle_indices 字典序)。碰撞集合与区间段片一一
-    对应：每个「线段 × 禁入圈」闭交集非空恰好对应一处碰撞。
+    对应：每个「线段 × 禁入圈」只要存在任一（含套管较粗半径的）闭交集
+    即恰好对应一处碰撞，但一条原线段上互不相连的侵入分量可以产生多个
+    片段（segment_index 相同）。
+
+    ``sleeves`` 为沿原路径累计里程的可选较粗接头套管；拆段只发生在
+    几何层内部，输出片段的 ``segment_index`` 始终是**原线段**编号。
     """
     n = len(nodes) - 1
 
@@ -662,31 +1004,44 @@ def analyze_path_full(
 
     pieces: List[SegmentPiece] = []
     collisions: List[Collision] = []
-    for seg_idx, cir_idx in _candidate_pairs(nodes, circles, cable_radius):
+    if sleeves:
+        pairs = _candidate_pairs_sleeved(nodes, circles, cable_radius, sleeves, cum)
+    else:
+        pairs = _candidate_pairs(nodes, circles, cable_radius)
+    for seg_idx, cir_idx in pairs:
         a = nodes[seg_idx]
         b = nodes[seg_idx + 1]
         center, circle_r = circles[cir_idx]
-        expanded = circle_r + cable_radius
-        tv = segment_disk_interval(a, b, center, expanded)
-        if tv is None:
-            continue
-        t0, t1 = tv
-        p0 = (a[0] + t0 * (b[0] - a[0]), a[1] + t0 * (b[1] - a[1]))
-        p1 = (a[0] + t1 * (b[0] - a[0]), a[1] + t1 * (b[1] - a[1]))
-        seg_len = cum[seg_idx + 1] - cum[seg_idx]
-        pieces.append(
-            SegmentPiece(
-                segment_index=seg_idx,
-                circle_index=cir_idx,
-                t0=t0,
-                t1=t1,
-                entry_point=p0,
-                exit_point=p1,
-                start_mileage=cum[seg_idx] + t0 * seg_len,
-                end_mileage=cum[seg_idx] + t1 * seg_len,
-            )
+        solved = _solve_segment_circle(
+            a,
+            b,
+            cum[seg_idx],
+            cum[seg_idx + 1],
+            center,
+            circle_r,
+            cable_radius,
+            sleeves,
         )
-        nearest, distance = nearest_point_on_segment(center, a, b)
+        if solved is None:
+            continue
+        parts, nearest, distance, expanded = solved
+        seg_len = cum[seg_idx + 1] - cum[seg_idx]
+        for t0, t1 in parts:
+            p0 = (a[0] + t0 * (b[0] - a[0]), a[1] + t0 * (b[1] - a[1]))
+            p1 = (a[0] + t1 * (b[0] - a[0]), a[1] + t1 * (b[1] - a[1]))
+            pieces.append(
+                SegmentPiece(
+                    segment_index=seg_idx,
+                    circle_index=cir_idx,
+                    t0=t0,
+                    t1=t1,
+                    entry_point=p0,
+                    exit_point=p1,
+                    start_mileage=cum[seg_idx] + t0 * seg_len,
+                    end_mileage=cum[seg_idx] + t1 * seg_len,
+                )
+            )
+        # 拆段不制造重复碰撞：每对「原线段 × 禁入圈」至多一条 Collision。
         collisions.append(
             Collision(
                 segment_index=seg_idx,

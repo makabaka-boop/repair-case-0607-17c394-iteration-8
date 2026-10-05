@@ -167,6 +167,22 @@ class CalibrationIn(BaseModel):
         return points
 
 
+class SleeveIn(BaseModel):
+    """可选接头套管：沿**原路径累计里程**的非空区间与套管外半径。
+
+    ``start_mileage``/``end_mileage`` 为未舍入累计里程（毫米，有限数值，
+    可带小数），区间必须非空且位于路径内；``outer_radius`` 不得小于电缆
+    半径。跨字段（路径总里程、电缆半径、区间非空）校验在端点处完成，
+    任何一项非法都整次 422 拒绝，不产生任何预检结论。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    start_mileage: FiniteNumber
+    end_mileage: FiniteNumber
+    outer_radius: PositiveNumber
+
+
 class RerouteIn(BaseModel):
     """一次性改线预览：替换连续节点区间 ``nodes[start_index..end_index]``。
 
@@ -193,6 +209,9 @@ class PrecheckRequest(BaseModel):
     calibration: Optional[CalibrationIn] = None
     # 可选一次性改线预览；省略时请求/响应与旧版逐项兼容。
     reroute: Optional[RerouteIn] = None
+    # 可选接头套管（沿原路径累计里程的更粗小段）；省略或为空时旧预检、
+    # 改线预览与旧版逐项兼容。
+    sleeves: Optional[List[SleeveIn]] = Field(default=None, max_length=100)
 
     @field_validator("nodes")
     @classmethod
@@ -282,6 +301,19 @@ class CompoundIntrusionSegmentOut(BaseModel):
     pieces: List[CompoundPieceOut]   # 按原线段切分的片段，供 SVG 高亮
 
 
+class SleeveOut(BaseModel):
+    """生效中的接头套管回显（展示值，三位小数；几何全程用未舍入值）。
+
+    前端区间详情与 SVG 共用本数组描画较粗套管走廊；原线与候选线视图
+    （同一请求快照）使用同一批里程定义。
+    """
+
+    start_mileage: float
+    end_mileage: float
+    outer_radius: float
+    length: float
+
+
 class CalibrationOut(BaseModel):
     """标定结果摘要（展示值，三位小数；变换本身以未舍入双精度应用）。"""
 
@@ -354,6 +386,8 @@ class CandidateRouteOut(BaseModel):
     compound_intrusion_segments: List[CompoundIntrusionSegmentOut] = Field(
         default_factory=list
     )
+    # 生效中的接头套管（未提交时为空数组，与旧版字段逐项兼容）。
+    sleeves: List[SleeveOut] = Field(default_factory=list)
 
 
 class ReroutePreviewOut(BaseModel):
@@ -384,3 +418,5 @@ class PrecheckResponse(BaseModel):
     # 请求带 reroute 时给一次性改线预览（原线结论仍在本对象顶层）；
     # 省略时为 null，旧接口逐项兼容。
     reroute_preview: Optional[ReroutePreviewOut] = None
+    # 生效中的接头套管（未提交时为空数组，与旧版字段逐项兼容）。
+    sleeves: List[SleeveOut] = Field(default_factory=list)

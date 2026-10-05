@@ -401,7 +401,10 @@ def test_without_reroute_response_is_unchanged():
         "compound_intrusion_segments",
         "calibration",
         "reroute_preview",
+        "sleeves",
     }
+    # 未提交套管时旧字段逐项兼容：sleeves 为空数组（不改变任何结论）。
+    assert data["sleeves"] == []
 
 
 def test_reroute_uses_same_calibration_for_both_routes():

@@ -45,6 +45,7 @@ const originalResult: PrecheckResponse = {
   collisions: [collision(0, 0, 0, 100), collision(0, 1, 100, 200)] as never,
   intrusion_intervals: [],
   compound_intrusion_segments: [],
+  sleeves: [],
 };
 
 /** 候选线：(-100,0)->(0,-40)->(100,0)，只消除全部碰撞（可敷设）。 */
@@ -63,6 +64,7 @@ const candidateResult = {
   collisions: [],
   intrusion_intervals: [],
   compound_intrusion_segments: [],
+  sleeves: [],
 };
 const previewOk: PrecheckResponse = {
   ...originalResult,

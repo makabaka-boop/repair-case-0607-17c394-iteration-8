@@ -420,6 +420,13 @@ h2 {
   stroke-linejoin: round;
 }
 
+.sleeve-corridor {
+  stroke: rgba(56, 189, 248, 0.22);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
 .cable-axis {
   stroke: var(--accent);
   stroke-linejoin: round;

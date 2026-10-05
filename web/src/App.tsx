@@ -9,6 +9,7 @@ import {
   type FormDraft,
   type NodeDraft,
   type RerouteDraft,
+  type SleeveDraft,
 } from "./lib/validation";
 import type {
   CircleRisk,
@@ -61,6 +62,11 @@ const emptyReroute = (): RerouteDraft => ({
   ],
 });
 
+const emptySleeves = (): SleeveDraft => ({
+  enabled: false,
+  rows: [],
+});
+
 const initialDraft: FormDraft = {
   cableRadius: "5",
   nodes: [
@@ -72,6 +78,7 @@ const initialDraft: FormDraft = {
   maxRmsError: "1",
   calibrationPairs: [emptyPair(), emptyPair()],
   reroute: emptyReroute(),
+  sleeves: emptySleeves(),
 };
 
 const fmt = (n: number) => String(n);
@@ -215,6 +222,45 @@ function RerouteRiskPanel({ preview }: { preview: ReroutePreview }) {
           </ul>
         </div>
       ))}
+    </div>
+  );
+}
+
+function SleevePanel({
+  sleeves,
+  candidate,
+}: {
+  sleeves: NonNullable<PrecheckResponse["sleeves"]>;
+  candidate: boolean;
+}) {
+  if (sleeves.length === 0) return null;
+  return (
+    <div className="interval-panel sleeves-panel" data-testid="sleeves-panel">
+      <h2 className="interval-title" data-testid="sleeves-title">
+        {candidate ? "候选线 · " : ""}接头套管（{sleeves.length} 段，沿原路径累计里程）
+      </h2>
+      <ol className="interval-list" data-testid="sleeve-result-list">
+        {sleeves.map((s, i) => (
+          <li className="interval-row" key={i} data-testid={`sleeve-row-${i}`}>
+            <div className="interval-head">
+              <span className="interval-order">#{i + 1}</span>
+              <span
+                className="interval-badge"
+                data-testid={`sleeve-row-${i}-range`}
+              >
+                {fmt(s.start_mileage)} → {fmt(s.end_mileage)} mm（长 {fmt(s.length)}）
+              </span>
+            </div>
+            <div className="interval-body">
+              <p>
+                套管外半径 {fmt(s.outer_radius)} mm；该里程范围内扩张安全圈按
+                「孔半径 + 套管外半径」裁决，命中点、原线段编号与里程映回同一套
+                侵入 / 复合侵入结果。
+              </p>
+            </div>
+          </li>
+        ))}
+      </ol>
     </div>
   );
 }
@@ -400,6 +446,71 @@ export function App() {
         },
       };
     });
+  };
+
+  // ---- 可选接头套管（沿原路径累计里程的更粗小段）----
+
+  const updateSleeveRow = (
+    i: number,
+    patch: Partial<{ startMileage: string; endMileage: string; outerRadius: string }>,
+  ) => {
+    setDraft((d) => ({
+      ...d,
+      sleeves: {
+        ...d.sleeves,
+        rows: d.sleeves.rows.map((row, idx) =>
+          idx === i ? { ...row, ...patch } : row,
+        ),
+      },
+    }));
+  };
+
+  const addSleeveRow = () => {
+    setDraft((d) => ({
+      ...d,
+      sleeves: {
+        ...d.sleeves,
+        rows: [
+          ...d.sleeves.rows,
+          { startMileage: "0", endMileage: "10", outerRadius: d.cableRadius || "0" },
+        ],
+      },
+    }));
+  };
+
+  const removeSleeveRow = (i: number) => {
+    setDraft((d) => ({
+      ...d,
+      sleeves: {
+        ...d.sleeves,
+        rows: d.sleeves.rows.filter((_, idx) => idx !== i),
+      },
+    }));
+  };
+
+  const enableSleeves = () => {
+    setDraft((d) => ({
+      ...d,
+      sleeves: {
+        enabled: true,
+        rows: d.sleeves.rows.length ? d.sleeves.rows : [
+          { startMileage: "0", endMileage: "10", outerRadius: d.cableRadius || "0" },
+        ],
+      },
+    }));
+    setErrors((es) => {
+      const next = { ...es };
+      Object.keys(next).forEach((k) => {
+        if (k.startsWith("sleeves")) delete next[k];
+      });
+      return next;
+    });
+  };
+
+  const disableSleeves = () => {
+    // 停用套管：下次提交必须不带 sleeves，已显示的旧（粗半径）结论立即作废，
+    // 避免画面残留新旧半径混用——由主提交重新生成；这里只清录入开关。
+    setDraft((d) => ({ ...d, sleeves: { ...d.sleeves, enabled: false } }));
   };
 
   /** 启用改线预览：以当前节点区间把折点重置为首尾两个边界节点。 */
@@ -1021,6 +1132,93 @@ export function App() {
             )}
           </section>
 
+          <section>
+            <div className="row-head">
+              <h2>接头套管（可选）：沿累计里程的较粗小段</h2>
+              <label className="calibration-toggle">
+                <input
+                  type="checkbox"
+                  data-testid="sleeves-enabled"
+                  checked={draft.sleeves.enabled}
+                  onChange={(e) => (e.target.checked ? enableSleeves() : disableSleeves())}
+                />
+                启用接头套管
+              </label>
+            </div>
+            {draft.sleeves.enabled && (
+              <div className="calibration-editor sleeves-editor" data-testid="sleeves-editor">
+                <p className="hint">
+                  里程沿<strong>原路径累计里程</strong>（从路径起点 0 起，逐段长度累加）。
+                  区间必须非空且位于路径内，套管外半径不得小于电缆半径；
+                  几何层会在未舍入里程处拆开受影响线段，套管范围内按较大半径求交。
+                </p>
+                {err(errors, "sleeves") && (
+                  <p className="field-error" data-testid="err-sleeves">
+                    {err(errors, "sleeves")}
+                  </p>
+                )}
+                <ol className="rows" data-testid="sleeve-list">
+                  {draft.sleeves.rows.map((row, i) => (
+                    <li key={i} className="row pair-row">
+                      <span className="row-index">套管 #{i}</span>
+                      <NumInput
+                        value={row.startMileage}
+                        testid={`sleeve-${i}-start`}
+                        ariaLabel={`套管 ${i} 起始累计里程`}
+                        invalid={hasErr(errors, `sleeves[${i}].start_mileage`)}
+                        onChange={(v) => updateSleeveRow(i, { startMileage: v })}
+                      />
+                      <span className="row-index">至</span>
+                      <NumInput
+                        value={row.endMileage}
+                        testid={`sleeve-${i}-end`}
+                        ariaLabel={`套管 ${i} 终止累计里程`}
+                        invalid={hasErr(errors, `sleeves[${i}].end_mileage`)}
+                        onChange={(v) => updateSleeveRow(i, { endMileage: v })}
+                      />
+                      <NumInput
+                        value={row.outerRadius}
+                        testid={`sleeve-${i}-radius`}
+                        ariaLabel={`套管 ${i} 外半径`}
+                        invalid={hasErr(errors, `sleeves[${i}].outer_radius`)}
+                        onChange={(v) => updateSleeveRow(i, { outerRadius: v })}
+                      />
+                      <button
+                        type="button"
+                        className="btn ghost small"
+                        aria-label={`删除套管 ${i}`}
+                        data-testid={`remove-sleeve-${i}`}
+                        onClick={() => removeSleeveRow(i)}
+                      >
+                        删除
+                      </button>
+                      {(err(errors, `sleeves[${i}].start_mileage`) ||
+                        err(errors, `sleeves[${i}].end_mileage`) ||
+                        err(errors, `sleeves[${i}].outer_radius`)) && (
+                        <p className="field-error row-error">
+                          {err(errors, `sleeves[${i}].start_mileage`) ??
+                            err(errors, `sleeves[${i}].end_mileage`) ??
+                            err(errors, `sleeves[${i}].outer_radius`)}
+                        </p>
+                      )}
+                    </li>
+                  ))}
+                </ol>
+                <div className="row-head pair-add">
+                  <span className="hint">{draft.sleeves.rows.length} 段套管（可重叠）</span>
+                  <button
+                    type="button"
+                    className="btn small"
+                    data-testid="add-sleeve"
+                    onClick={addSleeveRow}
+                  >
+                    + 套管段
+                  </button>
+                </div>
+              </div>
+            )}
+          </section>
+
           <div className="actions">
             <button type="submit" className="btn primary" data-testid="submit" disabled={loading}>
               {loading ? "预检中…" : "开始预检"}
@@ -1182,6 +1380,9 @@ export function App() {
               </ol>
             </div>
           )}
+
+          {/* 接头套管详情：与 SVG 套管走廊共用 viewResult.sleeves 同一数组 */}
+          {viewResult && <SleevePanel sleeves={viewResult.sleeves} candidate={showCandidate} />}
 
           {/* 改线风险摘要只属于改线快照：候选线视图下展示，原线视图不重复出现 */}
           {result && preview && showCandidate && <RerouteRiskPanel preview={preview} />}

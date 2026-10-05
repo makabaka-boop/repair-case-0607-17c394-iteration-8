@@ -702,6 +702,246 @@ describe("真实请求 + 录入 + 高亮（App）", () => {
     expect(screen.getByTestId("banner-ok")).toBeInTheDocument();
   });
 
+  // ---------- 接头套管（sleeves）----------
+
+  it("套管局部侵入：普通半径安全的孔在套管较粗半径下命中，API/详情/SVG 同源", async () => {
+    render(<App />);
+    // 路径 (0,0)->(100,0)，电缆 5；孔 (50,-20) r10：扩张15 安全、
+    // 套管外半径 10 扩张 20 -> 里程 50 恰好相切。
+    await userEvent.clear(screen.getByTestId("cable-radius"));
+    await userEvent.type(screen.getByTestId("cable-radius"), "5");
+    await userEvent.clear(screen.getByTestId("node-0-x"));
+    await userEvent.type(screen.getByTestId("node-0-x"), "0");
+    await userEvent.clear(screen.getByTestId("node-1-x"));
+    await userEvent.type(screen.getByTestId("node-1-x"), "100");
+    await userEvent.clear(screen.getByTestId("circle-0-x"));
+    await userEvent.type(screen.getByTestId("circle-0-x"), "50");
+    await userEvent.clear(screen.getByTestId("circle-0-y"));
+    await userEvent.type(screen.getByTestId("circle-0-y"), "-20");
+    await userEvent.clear(screen.getByTestId("circle-0-radius"));
+    await userEvent.type(screen.getByTestId("circle-0-radius"), "10");
+
+    // 先不带套管：可敷设
+    await submit();
+    await waitFor(() => expect(screen.getByTestId("banner-ok")).toBeInTheDocument());
+
+    // 启用套管 [50,70] 外半径 10（与电缆半径 5 不同），重新提交
+    await userEvent.click(screen.getByTestId("sleeves-enabled"));
+    await userEvent.clear(screen.getByTestId("sleeve-0-start"));
+    await userEvent.type(screen.getByTestId("sleeve-0-start"), "50");
+    await userEvent.clear(screen.getByTestId("sleeve-0-end"));
+    await userEvent.type(screen.getByTestId("sleeve-0-end"), "70");
+    await userEvent.clear(screen.getByTestId("sleeve-0-radius"));
+    await userEvent.type(screen.getByTestId("sleeve-0-radius"), "10");
+    await submit();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("banner-collision")).toBeInTheDocument(),
+    );
+    const detail = screen.getByTestId("first-collision-detail").textContent ?? "";
+    expect(detail).toContain("线段 #0");
+    expect(detail).toContain("(50, 0)");
+    expect(detail).toContain("20"); // 距离 == 扩张 20（较大半径裁决）
+    // 区间详情：零长相切，里程 50
+    const rows = within(screen.getByTestId("interval-panel")).getAllByRole("listitem");
+    expect(rows[0].textContent).toContain("相切零长点");
+    expect(rows[0].textContent).toContain("50");
+    // SVG 同源：侵入点 + 套管走廊片段
+    expect(document.querySelector('[data-testid="intrusion-c0-s0"]')).toBeInTheDocument();
+    expect(document.querySelector('[data-testid="sleeve-0-s0"]')).toBeInTheDocument();
+    // 套管详情面板与同一数组
+    const sleeveRow = screen.getByTestId("sleeve-row-0").textContent ?? "";
+    expect(sleeveRow).toContain("50");
+    expect(sleeveRow).toContain("70");
+  });
+
+  it("套管跨拐点：边界在未舍入里程拆段，一个连续区间跨两条原线段且 SVG 两段高亮", async () => {
+    render(<App />);
+    // (0,0)->(10,0)->(10,10)，电缆 5；孔 (10,-7) r1：扩张 6 安全（距7），
+    // 套管 [8,12] 外半径 8 扩张 9 -> 段0 t∈[.8,1] 与段1 t∈[0,.2] 均命中，
+    // 区间跨拐点 (10,0) 合并。
+    await userEvent.clear(screen.getByTestId("cable-radius"));
+    await userEvent.type(screen.getByTestId("cable-radius"), "5");
+    await userEvent.clear(screen.getByTestId("node-0-x"));
+    await userEvent.type(screen.getByTestId("node-0-x"), "0");
+    const n1x = screen.getByTestId("node-1-x");
+    const n1y = screen.getByTestId("node-1-y");
+    await userEvent.clear(n1x);
+    await userEvent.type(n1x, "10");
+    await userEvent.clear(n1y);
+    await userEvent.type(n1y, "0");
+    await userEvent.click(screen.getByTestId("add-node"));
+    await userEvent.clear(screen.getByTestId("node-2-x"));
+    await userEvent.type(screen.getByTestId("node-2-x"), "10");
+    await userEvent.clear(screen.getByTestId("node-2-y"));
+    await userEvent.type(screen.getByTestId("node-2-y"), "10");
+
+    await userEvent.clear(screen.getByTestId("circle-0-x"));
+    await userEvent.type(screen.getByTestId("circle-0-x"), "10");
+    await userEvent.clear(screen.getByTestId("circle-0-y"));
+    await userEvent.type(screen.getByTestId("circle-0-y"), "-7");
+    await userEvent.clear(screen.getByTestId("circle-0-radius"));
+    await userEvent.type(screen.getByTestId("circle-0-radius"), "1");
+
+    await userEvent.click(screen.getByTestId("sleeves-enabled"));
+    await userEvent.clear(screen.getByTestId("sleeve-0-start"));
+    await userEvent.type(screen.getByTestId("sleeve-0-start"), "8");
+    await userEvent.clear(screen.getByTestId("sleeve-0-end"));
+    await userEvent.type(screen.getByTestId("sleeve-0-end"), "12");
+    await userEvent.clear(screen.getByTestId("sleeve-0-radius"));
+    await userEvent.type(screen.getByTestId("sleeve-0-radius"), "8");
+
+    await submit();
+    await waitFor(() =>
+      expect(screen.getByTestId("interval-panel")).toBeInTheDocument(),
+    );
+    // 只有一个连续侵入区间（顶层行用唯一 testid，避开内嵌片段计数）
+    await waitFor(() =>
+      expect(screen.getByTestId("interval-0")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("interval-1")).not.toBeInTheDocument();
+    const text = screen.getByTestId("interval-0").textContent ?? "";
+    expect(text).toContain("进入线段 #0");
+    expect(text).toContain("离开线段 #1");
+    expect(text).toContain("8");
+    expect(text).toContain("12");
+    // 两段原线段各自高亮，且套管走廊在两段上都有片段
+    expect(document.querySelector('[data-testid="intrusion-c0-s0"]')).toBeInTheDocument();
+    expect(document.querySelector('[data-testid="intrusion-c0-s1"]')).toBeInTheDocument();
+    expect(document.querySelector('[data-testid="sleeve-0-s0"]')).toBeInTheDocument();
+    expect(document.querySelector('[data-testid="sleeve-0-s1"]')).toBeInTheDocument();
+    // 两条原线段各有一次碰撞（跨拐点物理上就是两处结构键）；拆段不制造
+    // 重复碰撞指的是每「原线段 × 圈」至多一个标记（这里恰好段0、段1各一）。
+    const collMarks = document.querySelectorAll('[data-testid^="collision-"]');
+    const collKeys = Array.from(collMarks).map((el) => el.getAttribute("data-testid"));
+    expect(collKeys.sort()).toEqual(["collision-0-0", "collision-1-0"]);
+  });
+
+  it("非法套管范围：本地拦截且整次拒绝，旧结论清除、不显示部分风险", async () => {
+    render(<App />);
+    // 先得到套管命中的结论（复用上个场景太繁琐，直接单段相切）
+    await userEvent.clear(screen.getByTestId("node-0-x"));
+    await userEvent.type(screen.getByTestId("node-0-x"), "0");
+    await userEvent.clear(screen.getByTestId("node-1-x"));
+    await userEvent.type(screen.getByTestId("node-1-x"), "100");
+    await userEvent.clear(screen.getByTestId("circle-0-x"));
+    await userEvent.type(screen.getByTestId("circle-0-x"), "50");
+    await userEvent.clear(screen.getByTestId("circle-0-y"));
+    await userEvent.type(screen.getByTestId("circle-0-y"), "-20");
+    await userEvent.clear(screen.getByTestId("circle-0-radius"));
+    await userEvent.type(screen.getByTestId("circle-0-radius"), "10");
+    await userEvent.click(screen.getByTestId("sleeves-enabled"));
+    await userEvent.clear(screen.getByTestId("sleeve-0-start"));
+    await userEvent.type(screen.getByTestId("sleeve-0-start"), "50");
+    await userEvent.clear(screen.getByTestId("sleeve-0-end"));
+    await userEvent.type(screen.getByTestId("sleeve-0-end"), "70");
+    await userEvent.clear(screen.getByTestId("sleeve-0-radius"));
+    await userEvent.type(screen.getByTestId("sleeve-0-radius"), "10");
+    await submit();
+    await waitFor(() =>
+      expect(screen.getByTestId("banner-collision")).toBeInTheDocument(),
+    );
+
+    // 改成空区间 start==end
+    await userEvent.clear(screen.getByTestId("sleeve-0-end"));
+    await userEvent.type(screen.getByTestId("sleeve-0-end"), "50");
+    await submit();
+    await waitFor(() => expect(screen.getByTestId("banner-error")).toBeInTheDocument());
+    // 起始字段标红（空区间错误挂在 start_mileage）
+    expect(
+      (screen.getByTestId("sleeve-0-start") as HTMLInputElement).className,
+    ).toContain("invalid");
+    // 旧碰撞、区间、SVG 全部清除（无部分风险残留）
+    expect(screen.queryByTestId("banner-collision")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("scene")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("sleeves-panel")).not.toBeInTheDocument();
+  });
+
+  it("停用套管后重新提交：恢复无套管结论，画面不残留套管走廊", async () => {
+    render(<App />);
+    await userEvent.clear(screen.getByTestId("node-0-x"));
+    await userEvent.type(screen.getByTestId("node-0-x"), "0");
+    await userEvent.clear(screen.getByTestId("node-1-x"));
+    await userEvent.type(screen.getByTestId("node-1-x"), "100");
+    await userEvent.clear(screen.getByTestId("circle-0-x"));
+    await userEvent.type(screen.getByTestId("circle-0-x"), "50");
+    await userEvent.clear(screen.getByTestId("circle-0-y"));
+    await userEvent.type(screen.getByTestId("circle-0-y"), "-20");
+    await userEvent.clear(screen.getByTestId("circle-0-radius"));
+    await userEvent.type(screen.getByTestId("circle-0-radius"), "10");
+    await userEvent.click(screen.getByTestId("sleeves-enabled"));
+    await userEvent.clear(screen.getByTestId("sleeve-0-start"));
+    await userEvent.type(screen.getByTestId("sleeve-0-start"), "50");
+    await userEvent.clear(screen.getByTestId("sleeve-0-end"));
+    await userEvent.type(screen.getByTestId("sleeve-0-end"), "70");
+    await userEvent.clear(screen.getByTestId("sleeve-0-radius"));
+    await userEvent.type(screen.getByTestId("sleeve-0-radius"), "10");
+    await submit();
+    await waitFor(() =>
+      expect(screen.getByTestId("banner-collision")).toBeInTheDocument(),
+    );
+    expect(document.querySelector('[data-testid="sleeve-0-s0"]')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByTestId("sleeves-enabled")); // 取消勾选
+    await submit();
+    await waitFor(() => expect(screen.getByTestId("banner-ok")).toBeInTheDocument());
+    // 新响应不含 sleeves，走廊与面板均消失（无新旧半径混用画面）
+    expect(document.querySelector('[data-testid="sleeve-layer"]')?.children.length).toBe(0);
+    expect(screen.queryByTestId("sleeves-panel")).not.toBeInTheDocument();
+  });
+
+  it("套管 + 改线预览：原线带套管、候选线无套管，同一快照切换严格同源", async () => {
+    render(<App />);
+    // 原线 (0,0)->(100,0)，电缆5，孔(20,-20)r10；普通扩张15安全（距20），
+    // 套管 [10,30] 外半径10 扩张20 -> 里程20相切命中。改线候选向上绕
+    // (50,60)（孔在路径下方），不带套管，候选可敷设。
+    await userEvent.clear(screen.getByTestId("node-0-x"));
+    await userEvent.type(screen.getByTestId("node-0-x"), "0");
+    await userEvent.clear(screen.getByTestId("node-1-x"));
+    await userEvent.type(screen.getByTestId("node-1-x"), "100");
+    await userEvent.clear(screen.getByTestId("circle-0-x"));
+    await userEvent.type(screen.getByTestId("circle-0-x"), "20");
+    await userEvent.clear(screen.getByTestId("circle-0-y"));
+    await userEvent.type(screen.getByTestId("circle-0-y"), "-20");
+    await userEvent.clear(screen.getByTestId("circle-0-radius"));
+    await userEvent.type(screen.getByTestId("circle-0-radius"), "10");
+    await userEvent.click(screen.getByTestId("sleeves-enabled"));
+    await userEvent.clear(screen.getByTestId("sleeve-0-start"));
+    await userEvent.type(screen.getByTestId("sleeve-0-start"), "10");
+    await userEvent.clear(screen.getByTestId("sleeve-0-end"));
+    await userEvent.type(screen.getByTestId("sleeve-0-end"), "30");
+    await userEvent.clear(screen.getByTestId("sleeve-0-radius"));
+    await userEvent.type(screen.getByTestId("sleeve-0-radius"), "10");
+    await submit();
+    await waitFor(() =>
+      expect(screen.getByTestId("banner-collision")).toBeInTheDocument(),
+    );
+
+    await userEvent.click(screen.getByTestId("reroute-enabled"));
+    await userEvent.click(screen.getByTestId("add-reroute-point"));
+    const mx = screen.getByTestId("reroute-point-1-x");
+    const my = screen.getByTestId("reroute-point-1-y");
+    await userEvent.clear(mx);
+    await userEvent.type(mx, "50");
+    await userEvent.clear(my);
+    await userEvent.type(my, "60");
+    await userEvent.click(screen.getByTestId("reroute-preview"));
+    await waitFor(() => expect(screen.getByTestId("view-switch")).toBeInTheDocument());
+
+    // 候选视图：无套管走廊、无套管面板、可敷设
+    await waitFor(() => expect(screen.getByTestId("banner-ok")).toBeInTheDocument());
+    expect(document.querySelector('[data-testid="sleeve-layer"]')?.children.length).toBe(0);
+    expect(screen.queryByTestId("sleeves-panel")).not.toBeInTheDocument();
+
+    // 切回原线：套管走廊与碰撞恢复（同一快照，无需请求）
+    await userEvent.click(screen.getByTestId("view-original"));
+    await waitFor(() =>
+      expect(screen.getByTestId("banner-collision")).toBeInTheDocument(),
+    );
+    expect(document.querySelector('[data-testid="sleeve-0-s0"]')).toBeInTheDocument();
+    expect(screen.getByTestId("sleeves-panel")).toBeInTheDocument();
+  });
+
   it("改线区间下标非法：本地拦截不发请求，已保存原方案保留", async () => {
     render(<App />);
     await submit();

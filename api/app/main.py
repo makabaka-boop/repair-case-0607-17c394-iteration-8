@@ -14,7 +14,9 @@ from .geometry import (
     Collision,
     CompoundIntrusionSegment,
     IntrusionInterval,
+    Sleeve,
     analyze_path_full,
+    cumulative_mileage,
 )
 from .reroute import (
     CircleRiskSummary,
@@ -41,6 +43,7 @@ from .schemas import (
     ReroutePreviewOut,
     RerouteRangeOut,
     RiskEventOut,
+    SleeveOut,
 )
 
 app = FastAPI(title="隧道电缆绕孔预检器", version="1.0.0")
@@ -111,6 +114,82 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 @app.get("/api/health")
 def health() -> Dict[str, str]:
     return {"status": "ok"}
+
+
+def _validate_sleeves(
+    sleeve_inputs: List[Any],
+    total_mileage: float,
+    cable_radius: float,
+) -> Tuple[List[Sleeve], List[Dict[str, Any]]]:
+    """套管跨字段校验：非空、位于路径内、外半径不小于电缆半径。
+
+    里程按**原路径**未舍入累计里程解释（区间端点可以落在任何线段内部，
+    几何层再在该未舍入里程处拆段）。任一非法即整次拒绝：返回的错误列表
+    非空时调用方必须 422，且不生成任何碰撞/侵入/复合侵入/改线结论。
+    重叠套管本身允许（并集上取较大半径），不报错。
+    """
+    sleeves: List[Sleeve] = []
+    errors: List[Dict[str, Any]] = []
+    for k, s in enumerate(sleeve_inputs):
+        item_errors: List[Dict[str, Any]] = []
+        loc0 = ("body", "sleeves", k, "start_mileage")
+        loc1 = ("body", "sleeves", k, "end_mileage")
+        if s.start_mileage >= s.end_mileage:
+            item_errors.append(
+                {
+                    "loc": loc0,
+                    "msg": (
+                        "Value error, 套管区间必须非空：start_mileage "
+                        f"{s.start_mileage:g} 必须严格小于 end_mileage {s.end_mileage:g}"
+                    ),
+                    "type": "value_error",
+                }
+            )
+        if s.start_mileage < 0.0 or s.end_mileage > total_mileage:
+            item_errors.append(
+                {
+                    "loc": loc1,
+                    "msg": (
+                        "Value error, 套管区间必须位于路径内：里程范围 "
+                        f"[0, {total_mileage:g}]，收到 "
+                        f"[{s.start_mileage:g}, {s.end_mileage:g}]"
+                    ),
+                    "type": "value_error",
+                }
+            )
+        if s.outer_radius < cable_radius:
+            item_errors.append(
+                {
+                    "loc": ("body", "sleeves", k, "outer_radius"),
+                    "msg": (
+                        "Value error, 套管外半径 "
+                        f"{s.outer_radius:g} 不得小于原电缆半径 {cable_radius:g}"
+                    ),
+                    "type": "value_error",
+                }
+            )
+        errors.extend(item_errors)
+        if not item_errors:
+            sleeves.append(
+                Sleeve(
+                    start_mileage=float(s.start_mileage),
+                    end_mileage=float(s.end_mileage),
+                    outer_radius=float(s.outer_radius),
+                )
+            )
+    return sleeves, errors
+
+
+def _sleeve_views(sleeves: List[Sleeve]) -> List[SleeveOut]:
+    return [
+        SleeveOut(
+            start_mileage=round3(s.start_mileage),
+            end_mileage=round3(s.end_mileage),
+            outer_radius=round3(s.outer_radius),
+            length=round3(s.end_mileage - s.start_mileage),
+        )
+        for s in sleeves
+    ]
 
 
 def _circle_views(
@@ -213,6 +292,7 @@ def _route_view(
     intervals: List[IntrusionInterval],
     compounds: List[CompoundIntrusionSegment],
     rpt,
+    sleeves: Optional[List[Sleeve]] = None,
 ) -> Dict[str, Any]:
     """一套几何结论 → 序列化字段（原线/候选线完全同源，避免两条链路漂移）。"""
     collision_views = _collision_views(raw, circles, cable_radius, rpt)
@@ -226,6 +306,7 @@ def _route_view(
         "collisions": collision_views,
         "intrusion_intervals": _interval_views(intervals, rpt),
         "compound_intrusion_segments": _compound_views(compounds, rpt),
+        "sleeves": _sleeve_views(sleeves or []),
     }
 
 
@@ -333,6 +414,18 @@ def precheck(payload: PrecheckRequest) -> PrecheckResponse:
             replacement,
         )
 
+    # 可选接头套管：里程沿**原路径**未舍入累计里程解释。区间非空、位于
+    # 路径内、外半径不小于电缆半径的跨字段校验在此整次完成——任一非法
+    # 即 422，绝不输出部分风险（原线/候选线/区间/复合侵入均不生成）。
+    total_mileage = cumulative_mileage(nodes)[-1]
+    sleeve_objs: List[Sleeve] = []
+    if payload.sleeves:
+        sleeve_objs, sleeve_errors = _validate_sleeves(
+            list(payload.sleeves), total_mileage, payload.cable_radius
+        )
+        if sleeve_errors:
+            raise RequestValidationError(errors=sleeve_errors)
+
     def rpt(p) -> PointOut:
         return PointOut(x=round3(p[0]), y=round3(p[1]))
 
@@ -344,9 +437,11 @@ def precheck(payload: PrecheckRequest) -> PrecheckResponse:
         nodes=nodes,
         circles=circles,
         cable_radius=payload.cable_radius,
+        sleeves=sleeve_objs,
     )
     original_fields = _route_view(
-        nodes, circles, payload.cable_radius, raw, intervals, compounds, rpt
+        nodes, circles, payload.cable_radius, raw, intervals, compounds, rpt,
+        sleeves=sleeve_objs,
     )
 
     # ---- 候选线：同一标定后的禁入圈、同一套精确几何规则再算一次 ----
@@ -360,6 +455,7 @@ def precheck(payload: PrecheckRequest) -> PrecheckResponse:
             nodes=candidate_nodes,
             circles=circles,
             cable_radius=payload.cable_radius,
+            sleeves=[],
         )
         candidate_fields = _route_view(
             candidate_nodes,

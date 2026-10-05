@@ -138,6 +138,8 @@ interface PrecheckResponseBase {
   collisions: Collision[];
   intrusion_intervals: IntrusionInterval[];
   compound_intrusion_segments: CompoundIntrusionSegment[];
+  // 生效中的接头套管（未提交时为空数组，与旧版逐项兼容）。
+  sleeves: SleeveView[];
 }
 
 export interface PrecheckResponse extends PrecheckResponseBase {
@@ -147,12 +149,29 @@ export interface PrecheckResponse extends PrecheckResponseBase {
   reroute_preview?: ReroutePreview | null;
 }
 
+// ---------- 可选接头套管（沿原路径累计里程的更粗小段）----------
+
+export interface SleevePayload {
+  start_mileage: number;
+  end_mileage: number;
+  outer_radius: number;
+}
+
+export interface SleeveView {
+  start_mileage: number;
+  end_mileage: number;
+  outer_radius: number;
+  length: number;
+}
+
 export interface PrecheckPayload {
   nodes: Point[];
   cable_radius: number;
   circles: Array<Point & { radius: number }>;
   calibration?: CalibrationPayload;
   reroute?: ReroutePayload;
+  // 省略或为空数组时旧预检/改线预览逐项兼容。
+  sleeves?: SleevePayload[];
 }
 
 export type FieldErrors = Record<string, string>;

@@ -51,6 +51,7 @@ const orderedCollisionsResult: PrecheckResponse = {
   ],
   intrusion_intervals: [],
   compound_intrusion_segments: [],
+  sleeves: [],
 };
 
 describe("App collision details", () => {

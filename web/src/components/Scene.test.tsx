@@ -50,6 +50,7 @@ const orderedCollisionsResult: PrecheckResponse = {
   ],
   intrusion_intervals: [],
   compound_intrusion_segments: [],
+  sleeves: [],
 };
 
 describe("Scene", () => {
@@ -104,6 +105,7 @@ describe("Scene", () => {
       ],
       intrusion_intervals: [],
       compound_intrusion_segments: [],
+      sleeves: [],
     };
 
     const { getByTestId } = render(<Scene result={result} />);
@@ -163,6 +165,7 @@ describe("Scene", () => {
         },
       ],
       compound_intrusion_segments: [],
+      sleeves: [],
     };
 
     const { getByTestId } = render(<Scene result={result} />);
@@ -207,6 +210,7 @@ describe("Scene", () => {
         },
       ],
       compound_intrusion_segments: [],
+      sleeves: [],
     };
     const { getByTestId } = render(<Scene result={result} />);
     const mark = getByTestId("intrusion-c0-s0");
@@ -263,6 +267,7 @@ describe("Scene", () => {
           ],
         },
       ],
+      sleeves: [],
     };
 
     const { getByTestId } = render(<Scene result={result} />);
@@ -310,6 +315,7 @@ describe("Scene", () => {
           ],
         },
       ],
+      sleeves: [],
     };
 
     const { getByTestId } = render(<Scene result={result} />);

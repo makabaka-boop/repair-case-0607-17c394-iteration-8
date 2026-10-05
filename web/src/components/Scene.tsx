@@ -1,4 +1,8 @@
-import type { CompoundIntrusionSegment, PrecheckResponse } from "../types";
+import type {
+  CompoundIntrusionSegment,
+  PrecheckResponse,
+  SleeveView,
+} from "../types";
 
 interface Props {
   result: PrecheckResponse;
@@ -19,6 +23,40 @@ const HIGHLIGHT_COLORS = [
   "#4ade80",
   "#38bdf8",
 ];
+
+// 套管走廊：醒目的蓝绿色宽带（比电缆粗），与侵入/复合高亮区分。
+const SLEEVE_COLOR = "#38bdf8";
+
+/** 各节点累计里程（与后端 cumulative_mileage 同一算法，展示坐标足够）。 */
+function nodeMileages(result: PrecheckResponse): number[] {
+  const cum = [0];
+  for (let i = 1; i < result.nodes.length; i++) {
+    const a = result.nodes[i - 1];
+    const b = result.nodes[i];
+    cum.push(cum[i - 1] + Math.hypot(b.x - a.x, b.y - a.y));
+  }
+  return cum;
+}
+
+/** 里程对应路径坐标（线段内线性插值，夹到节点）。 */
+function pointAtMileage(
+  result: PrecheckResponse,
+  cum: number[],
+  mileage: number,
+): { p: { x: number; y: number }; seg: number } {
+  let seg = 0;
+  for (let i = 0; i < cum.length; i++) {
+    if (cum[i] <= mileage) seg = i;
+  }
+  if (seg >= result.nodes.length - 1) {
+    seg = result.nodes.length - 2;
+  }
+  const a = result.nodes[seg];
+  const b = result.nodes[seg + 1];
+  const segLen = cum[seg + 1] - cum[seg] || 1;
+  const t = Math.max(0, Math.min(1, (mileage - cum[seg]) / segLen));
+  return { p: { x: a.x + t * (b.x - a.x), y: a.y + t * (b.y - a.y) }, seg };
+}
 
 export function highlightColor(circleIndex: number): string {
   return HIGHLIGHT_COLORS[circleIndex % HIGHLIGHT_COLORS.length];
@@ -48,6 +86,16 @@ function computeView(result: PrecheckResponse): View {
     xs.push(c.center.x - c.expanded_radius, c.center.x + c.expanded_radius);
     ys.push(c.center.y - c.expanded_radius, c.center.y + c.expanded_radius);
   });
+  // 套管走廊比电缆粗：按最大套管外半径在各轴上预留厚度（沿路径方向，
+  // x/y 都预留可容纳斜向走廊）。
+  const maxSleeve = result.sleeves.reduce(
+    (m, s) => Math.max(m, s.outer_radius),
+    0,
+  );
+  if (maxSleeve > 0) {
+    xs.push(...result.nodes.map((p) => p.x - maxSleeve), ...result.nodes.map((p) => p.x + maxSleeve));
+    ys.push(...result.nodes.map((p) => p.y - maxSleeve), ...result.nodes.map((p) => p.y + maxSleeve));
+  }
 
   let minX = Math.min(...xs);
   let maxX = Math.max(...xs);
@@ -196,6 +244,29 @@ export function Scene({ result }: Props) {
 
   const cablePx = Math.max(2, sr(result.cable_radius));
 
+  // 套管走廊：把每段套管 [start_mileage, end_mileage] 映射到路径折线，
+  // 跨拐点时在每个拐点处断开为多段 path（视觉上仍连续）。片段与
+  // viewResult.sleeves（区间详情面板所用同一数组）严格同源。
+  const cum = nodeMileages(result);
+  const sleevePaths: Array<{ key: string; d: string; widthPx: number; index: number }> = [];
+  result.sleeves.forEach((sv: SleeveView, sIdx) => {
+    const widthPx = Math.max(cablePx + 3, sr(sv.outer_radius) * 2 + 2);
+    // 找出与套管里程区间相交的原线段。
+    for (let i = 0; i < result.nodes.length - 1; i++) {
+      const lo = Math.max(sv.start_mileage, cum[i]);
+      const hi = Math.min(sv.end_mileage, cum[i + 1]);
+      if (hi < lo) continue;
+      const p0 = pointAtMileage(result, cum, lo).p;
+      const p1 = pointAtMileage(result, cum, hi).p;
+      sleevePaths.push({
+        key: `sleeve-${sIdx}-s${i}`,
+        d: `M ${sx(p0.x).toFixed(2)} ${sy(p0.y).toFixed(2)} L ${sx(p1.x).toFixed(2)} ${sy(p1.y).toFixed(2)}`,
+        widthPx,
+        index: sIdx,
+      });
+    }
+  });
+
   return (
     <svg
       viewBox={`0 0 ${W} ${H}`}
@@ -230,6 +301,24 @@ export function Scene({ result }: Props) {
       ))}
 
       {/* 电缆折线路径（线宽体现电缆半径） */}
+
+      {/* 接头套管走廊：先于电缆本体绘制（较粗、半透明），与详情同一数组。 */}
+      <g data-testid="sleeve-layer">
+        {sleevePaths.map((f) => (
+          <path
+            key={f.key}
+            d={f.d}
+            className="sleeve-corridor"
+            stroke={SLEEVE_COLOR}
+            strokeWidth={f.widthPx}
+            fill="none"
+            data-testid={f.key}
+          >
+            <title>{`套管 #${f.index}（外半径按里程段生效）`}</title>
+          </path>
+        ))}
+      </g>
+
       <path d={pathD} className="cable-path" strokeWidth={cablePx} fill="none" />
       <path d={pathD} className="cable-axis" strokeWidth={1} fill="none" />
 

@@ -1,4 +1,9 @@
-import type { FieldErrors, PrecheckPayload, ReroutePayload } from "../types";
+import type {
+  FieldErrors,
+  PrecheckPayload,
+  ReroutePayload,
+  SleevePayload,
+} from "../types";
 
 /** 表单中的原始字段都以字符串保存，提交时统一解析、校验。 */
 export interface NodeDraft {
@@ -25,6 +30,16 @@ export interface RerouteDraft {
   /** 替代折点；首尾两个固定为被替换区间的边界节点（由 App 同步）。 */
   points: NodeDraft[];
 }
+/** 一段接头套管：沿原路径累计里程的非空区间 + 套管外半径。 */
+export interface SleeveDraft {
+  enabled: boolean;
+  /** 各段套管（可多段）；里程按当前录入路径累计长度解释。 */
+  rows: Array<{
+    startMileage: string;
+    endMileage: string;
+    outerRadius: string;
+  }>;
+}
 export interface FormDraft {
   cableRadius: string;
   nodes: NodeDraft[];
@@ -33,6 +48,7 @@ export interface FormDraft {
   maxRmsError: string;
   calibrationPairs: CalibrationPairDraft[];
   reroute: RerouteDraft;
+  sleeves: SleeveDraft;
 }
 
 function parseFiniteInt(raw: string): number {
@@ -68,6 +84,18 @@ function parseFiniteNumber(raw: string): number {
   const n = Number(t);
   if (!Number.isFinite(n)) throw new Error("必须是有限数值（不能是 NaN 或无穷）");
   return n;
+}
+
+/** 由已解析节点计算路径累计总里程（与后端 cumulative_mileage 同算法）。 */
+export function pathTotalMileage(nodes: Array<{ x: number; y: number }>): number {
+  let total = 0;
+  for (let i = 0; i < nodes.length - 1; i++) {
+    total += Math.hypot(
+      nodes[i + 1].x - nodes[i].x,
+      nodes[i + 1].y - nodes[i].y,
+    );
+  }
+  return total;
 }
 
 /** 与后端一致的字段级校验；返回 errors 映射（空对象表示通过）。 */
@@ -192,11 +220,87 @@ export function validateDraft(draft: FormDraft): FieldErrors {
     validateRerouteDraft(draft, parsedNodes, errors);
   }
 
+  // 可选接头套管：字段键与后端一致（sleeves[i].*）；未启用时不校验不上送。
+  if (draft.sleeves.enabled) {
+    validateSleevesDraft(draft, parsedNodes, errors);
+  }
+
   return errors;
 }
 
 /** 已解析的路径节点（主校验通过时可用）；解析失败给 null。 */
 type ParsedNode = { x: number; y: number } | null;
+
+function validateSleevesDraft(
+  draft: FormDraft,
+  parsedNodes: ParsedNode[],
+  errors: FieldErrors,
+): void {
+  const rows = draft.sleeves.rows;
+  if (rows.length === 0) {
+    errors["sleeves"] = "至少添加一段套管，或取消启用";
+    return;
+  }
+  // 路径节点全部合法时才能按累计里程校验范围；任一节点非法时跳过
+  // 跨字段检查（节点错误已另行标红），字段本身仍逐行解析。
+  const validNodes = parsedNodes.filter(
+    (n): n is { x: number; y: number } => n !== null,
+  );
+  const totalMileage =
+    validNodes.length === draft.nodes.length
+      ? pathTotalMileage(validNodes)
+      : null;
+  let cable = Number.NaN;
+  try {
+    cable = parsePositiveFinite(draft.cableRadius);
+  } catch {
+    cable = Number.NaN;
+  }
+
+  rows.forEach((row, i) => {
+    let s = Number.NaN;
+    let e = Number.NaN;
+    let r = Number.NaN;
+    const readStart = () => {
+      try {
+        s = parseFiniteNumber(row.startMileage);
+      } catch (err) {
+        errors[`sleeves[${i}].start_mileage`] = `起始里程${(err as Error).message}`;
+      }
+    };
+    const readEnd = () => {
+      try {
+        e = parseFiniteNumber(row.endMileage);
+      } catch (err) {
+        errors[`sleeves[${i}].end_mileage`] = `终止里程${(err as Error).message}`;
+      }
+    };
+    try {
+      r = parsePositiveFinite(row.outerRadius);
+    } catch (err) {
+      errors[`sleeves[${i}].outer_radius`] = `套管外半径${(err as Error).message}`;
+    }
+    readStart();
+    readEnd();
+    if (Number.isFinite(s) && Number.isFinite(e) && s >= e) {
+      errors[`sleeves[${i}].start_mileage`] =
+        "套管区间必须非空：起始里程必须严格小于终止里程";
+    }
+    if (
+      totalMileage !== null &&
+      Number.isFinite(s) &&
+      Number.isFinite(e) &&
+      (s < 0 || e > totalMileage)
+    ) {
+      errors[`sleeves[${i}].end_mileage`] =
+        `套管区间必须位于路径内：里程范围 [0, ${totalMileage}]`;
+    }
+    if (Number.isFinite(r) && Number.isFinite(cable) && r < cable) {
+      errors[`sleeves[${i}].outer_radius`] =
+        `套管外半径不得小于原电缆半径 ${cable}`;
+    }
+  });
+}
 
 function validateRerouteDraft(
   draft: FormDraft,
@@ -301,7 +405,20 @@ export function buildPayload(draft: FormDraft): PrecheckPayload {
   if (draft.reroute.enabled) {
     payload.reroute = buildReroutePayload(draft);
   }
+  // 未启用套管时完全省略 sleeves 键，请求与旧版逐项一致。
+  if (draft.sleeves.enabled && draft.sleeves.rows.length > 0) {
+    payload.sleeves = buildSleevesPayload(draft);
+  }
   return payload;
+}
+
+/** 解析套管段（调用前应已通过 validateDraft）。 */
+export function buildSleevesPayload(draft: FormDraft): SleevePayload[] {
+  return draft.sleeves.rows.map((row) => ({
+    start_mileage: parseFiniteNumber(row.startMileage),
+    end_mileage: parseFiniteNumber(row.endMileage),
+    outer_radius: parsePositiveFinite(row.outerRadius),
+  }));
 }
 
 /** 解析改线段（调用前应已通过 validateDraft）。 */

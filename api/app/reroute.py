@@ -301,17 +301,20 @@ def _replacement_is_equivalent(
 
 def _interval_group_ids(
     intervals: Sequence[IntrusionInterval],
-) -> Dict[Tuple[int, int], int]:
-    """``(线段下标, 禁入圈)`` → 所属连续侵入区间号。
+) -> Dict[Tuple[int, int], Tuple[int, ...]]:
+    """``(线段下标, 禁入圈)`` → 所属连续侵入区间号（可能多个）。
 
     碰撞集合与区间片段一一对应（见 :func:`geometry.analyze_path_full`），
-    每个碰撞必属于恰好一个区间；区间即“同一禁入圈在曲线上的极大连通
-    覆盖”，是不随分段方式变化的物理占用身份。
+    每个碰撞必属于至少一个区间；区间即“同一禁入圈在曲线上的极大连通
+    覆盖”，是不随分段方式变化的物理占用身份。接头套管在未舍入里程处
+    拆段后，同一条原线段上互不相连的多个侵入分量可能分属不同区间，
+    故这里返回区间号元组（普通场景恒为单元素元组）。
     """
-    group_of: Dict[Tuple[int, int], int] = {}
+    group_of: Dict[Tuple[int, int], Tuple[int, ...]] = {}
     for gid, iv in enumerate(intervals):
         for piece in iv.pieces:
-            group_of[(piece.segment_index, piece.circle_index)] = gid
+            key = (piece.segment_index, piece.circle_index)
+            group_of[key] = group_of.get(key, ()) + (gid,)
     return group_of
 
 
@@ -359,16 +362,20 @@ def _diff_equivalent_replacement(
         intervals: Sequence[IntrusionInterval],
     ) -> Dict[int, List[Tuple[float, int, List[Collision]]]]:
         group_of = _interval_group_ids(intervals)
-        acc: Dict[int, List[Collision]] = {}
+        acc: Dict[int, Dict[int, List[Collision]]] = {}
         for c in events:
-            acc.setdefault(group_of[(c.segment_index, c.circle_index)], []).append(c)
+            # 同一碰撞（原线段 × 圈）的所有连通侵入分量都记入各自区间；
+            # 代表点归并仍按区间内最近逼近事件处理。
+            for gid in group_of[(c.segment_index, c.circle_index)]:
+                acc.setdefault(c.circle_index, {}).setdefault(gid, []).append(c)
         per_circle: Dict[int, List[Tuple[float, int, List[Collision]]]] = {}
-        for gid, evs in acc.items():
-            per_circle.setdefault(evs[0].circle_index, []).append(
+        for circle, groups in acc.items():
+            lst = [
                 (intervals[gid].start_mileage, gid, evs)
-            )
-        for lst in per_circle.values():
+                for gid, evs in groups.items()
+            ]
             lst.sort(key=lambda item: (item[0], item[1]))
+            per_circle[circle] = lst
         return per_circle
 
     o_groups = grouped(original_replaced, original_intervals)

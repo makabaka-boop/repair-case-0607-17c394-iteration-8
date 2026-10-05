@@ -11,6 +11,11 @@ const disabledReroute = {
   ],
 };
 
+const disabledSleeves = {
+  enabled: false,
+  rows: [],
+};
+
 const okDraft: FormDraft = {
   cableRadius: "5",
   nodes: [
@@ -25,6 +30,7 @@ const okDraft: FormDraft = {
     { surveyX: "", surveyY: "", pathX: "", pathY: "" },
   ],
   reroute: disabledReroute,
+  sleeves: disabledSleeves,
 };
 
 /** 启用标定的合法草稿：纯平移 survey = path + (1000, 2000)。 */
@@ -104,6 +110,7 @@ describe("录入校验 validateDraft（与后端字段键一致）", () => {
       maxRmsError: "1",
       calibrationPairs: [],
       reroute: disabledReroute,
+      sleeves: disabledSleeves,
     };
     const errors = validateDraft(d);
     expect(Object.keys(errors).sort()).toEqual(
@@ -315,5 +322,78 @@ describe("一次性改线校验（字段键与后端 reroute.* 一致）", () =>
     expect(
       validateDraft(frac)["reroute.replacement_points[1].x"],
     ).toBeTruthy();
+  });
+});
+
+describe("接头套管校验（字段键与后端 sleeves[i].* 一致）", () => {
+  const sleeve = (s: string, e: string, r: string) => ({
+    startMileage: s,
+    endMileage: e,
+    outerRadius: r,
+  });
+
+  it("未启用：不校验，载荷省略 sleeves 键", () => {
+    const d: FormDraft = {
+      ...okDraft,
+      sleeves: { enabled: false, rows: [sleeve("0", "0", "x")] },
+    };
+    expect(validateDraft(d)).toEqual({});
+    expect("sleeves" in buildPayload(d)).toBe(false);
+  });
+
+  it("合法套管：无错误，载荷携带未舍入数值（路径总长 100）", () => {
+    // 路径 (0,0)->(100,0) 长 100
+    const d: FormDraft = {
+      ...okDraft,
+      sleeves: { enabled: true, rows: [sleeve("40.5", "60", "5"), sleeve("75", "80.125", "7.5")] },
+    };
+    expect(validateDraft(d)).toEqual({});
+    expect(buildPayload(d).sleeves).toEqual([
+      { start_mileage: 40.5, end_mileage: 60, outer_radius: 5 },
+      { start_mileage: 75, end_mileage: 80.125, outer_radius: 7.5 },
+    ]);
+  });
+
+  it("外半径等于电缆半径合法；小于电缆半径报错", () => {
+    let d: FormDraft = {
+      ...okDraft,
+      sleeves: { enabled: true, rows: [sleeve("10", "20", "5")] },
+    };
+    expect(validateDraft(d)).toEqual({});
+
+    d = { ...okDraft, sleeves: { enabled: true, rows: [sleeve("10", "20", "4.9")] } };
+    expect(validateDraft(d)["sleeves[0].outer_radius"]).toContain("不得小于");
+  });
+
+  it("区间非空（start < end）校验", () => {
+    const d: FormDraft = {
+      ...okDraft,
+      sleeves: { enabled: true, rows: [sleeve("30", "30", "10")] },
+    };
+    expect(validateDraft(d)["sleeves[0].start_mileage"]).toContain("非空");
+  });
+
+  it("区间必须位于路径内 [0, 100]", () => {
+    let d: FormDraft = {
+      ...okDraft,
+      sleeves: { enabled: true, rows: [sleeve("-0.1", "20", "10")] },
+    };
+    expect(validateDraft(d)["sleeves[0].end_mileage"]).toContain("路径内");
+
+    d = { ...okDraft, sleeves: { enabled: true, rows: [sleeve("50", "100.1", "10")] } };
+    expect(validateDraft(d)["sleeves[0].end_mileage"]).toContain("路径内");
+  });
+
+  it("非有限值 / 非正半径报字段错误，多项错误同时收集", () => {
+    const d: FormDraft = {
+      ...okDraft,
+      sleeves: {
+        enabled: true,
+        rows: [sleeve("abc", "10", "10"), sleeve("0", "10", "-2")],
+      },
+    };
+    const errors = validateDraft(d);
+    expect(errors["sleeves[0].start_mileage"]).toBeTruthy();
+    expect(errors["sleeves[1].outer_radius"]).toBeTruthy();
   });
 });
