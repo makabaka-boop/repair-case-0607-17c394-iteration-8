@@ -24,6 +24,7 @@ const okDraft: FormDraft = {
     { surveyX: "", surveyY: "", pathX: "", pathY: "" },
     { surveyX: "", surveyY: "", pathX: "", pathY: "" },
   ],
+  sleeve: { enabled: false, startMileage: "40", endMileage: "60", outerRadius: "8" },
   reroute: disabledReroute,
 };
 
@@ -103,6 +104,7 @@ describe("录入校验 validateDraft（与后端字段键一致）", () => {
       calibrationEnabled: false,
       maxRmsError: "1",
       calibrationPairs: [],
+      sleeve: { enabled: false, startMileage: "", endMileage: "", outerRadius: "" },
       reroute: disabledReroute,
     };
     const errors = validateDraft(d);
@@ -315,5 +317,54 @@ describe("一次性改线校验（字段键与后端 reroute.* 一致）", () =>
     expect(
       validateDraft(frac)["reroute.replacement_points[1].x"],
     ).toBeTruthy();
+  });
+});
+
+describe("套管 sleeve 录入校验（字段键与后端一致）", () => {
+  const sleeve = (patch: Partial<FormDraft["sleeve"]> = {}): FormDraft => ({
+    ...okDraft,
+    sleeve: { enabled: true, startMileage: "40", endMileage: "60", outerRadius: "8", ...patch },
+  });
+
+  it("合法套管：通过并进入 payload（路径总长 100，外半径 ≥ 电缆 5）", () => {
+    const d = sleeve();
+    expect(validateDraft(d)).toEqual({});
+    expect(buildPayload(d).sleeve).toEqual({
+      start_mileage: 40,
+      end_mileage: 60,
+      outer_radius: 8,
+    });
+  });
+
+  it("未启用套管：payload 不含 sleeve 键（逐项兼容）", () => {
+    const d = sleeve({ enabled: false });
+    expect(validateDraft(d)).toEqual({});
+    expect("sleeve" in buildPayload(d)).toBe(false);
+  });
+
+  it("空区间（起点 ≥ 终点）报错", () => {
+    expect(validateDraft(sleeve({ startMileage: "60", endMileage: "60" }))["sleeve.start_mileage"]).toContain("非空");
+    expect(validateDraft(sleeve({ startMileage: "70", endMileage: "60" }))["sleeve.start_mileage"]).toContain("非空");
+  });
+
+  it("越界里程报错（超出 [0, 路径总长]）", () => {
+    expect(validateDraft(sleeve({ endMileage: "120" }))["sleeve.start_mileage"]).toContain("路径内");
+    expect(validateDraft(sleeve({ startMileage: "-5", endMileage: "60" }))["sleeve.start_mileage"]).toContain("路径内");
+  });
+
+  it("外半径小于电缆半径报错", () => {
+    const d = sleeve({ outerRadius: "4" }); // 电缆半径 5
+    expect(validateDraft(d)["sleeve.outer_radius"]).toContain("不得小于");
+  });
+
+  it("非正数 / NaN / 非数值外半径与里程报错", () => {
+    expect(validateDraft(sleeve({ outerRadius: "0" }))["sleeve.outer_radius"]).toBeTruthy();
+    expect(validateDraft(sleeve({ startMileage: "abc" }))["sleeve.start_mileage"]).toBeTruthy();
+    expect(validateDraft(sleeve({ endMileage: "NaN" }))["sleeve.end_mileage"]).toBeTruthy();
+  });
+
+  it("边界里程可取路径起终点（0 与总长 100）", () => {
+    const d = sleeve({ startMileage: "0", endMileage: "100" });
+    expect(validateDraft(d)).toEqual({});
   });
 });

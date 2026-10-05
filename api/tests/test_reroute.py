@@ -400,8 +400,10 @@ def test_without_reroute_response_is_unchanged():
         "intrusion_intervals",
         "compound_intrusion_segments",
         "calibration",
+        "sleeve",
         "reroute_preview",
     }
+    assert data["sleeve"] is None
 
 
 def test_reroute_uses_same_calibration_for_both_routes():

@@ -183,6 +183,31 @@ class RerouteIn(BaseModel):
     replacement_points: Annotated[List[StrictPointIn], Field(min_length=2)]
 
 
+class SleeveIn(BaseModel):
+    """可选加粗接头套管（预检一段更粗的局部外半径）。
+
+    里程按**原路径累计长度**给出（允许小数毫米）：``start_mileage`` /
+    ``end_mileage`` 为闭区间起止，必须满足非空（start < end）、位于
+    [0, 路径总长] 内；``outer_radius`` 为正数且不得小于电缆半径。
+    跨字段校验（范围、与路径/电缆半径的关系）在端点处完成；非法范围
+    整次拒绝（422），不输出任何部分风险。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    start_mileage: FiniteNumber
+    end_mileage: FiniteNumber
+    outer_radius: PositiveRadius
+
+
+class SleeveOut(BaseModel):
+    """本次请求生效的套管（回显，供区间详情定位与 SVG 同源描画）。"""
+
+    start_mileage: float          # 展示值（三位小数）
+    end_mileage: float
+    outer_radius: float           # 套管外半径（三位小数）
+
+
 class PrecheckRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -193,6 +218,8 @@ class PrecheckRequest(BaseModel):
     calibration: Optional[CalibrationIn] = None
     # 可选一次性改线预览；省略时请求/响应与旧版逐项兼容。
     reroute: Optional[RerouteIn] = None
+    # 可选加粗接头套管（按原路径累计里程给出闭区间）；省略时逐项兼容。
+    sleeve: Optional[SleeveIn] = None
 
     @field_validator("nodes")
     @classmethod
@@ -354,6 +381,9 @@ class CandidateRouteOut(BaseModel):
     compound_intrusion_segments: List[CompoundIntrusionSegmentOut] = Field(
         default_factory=list
     )
+    # 候选线始终按统一电缆半径计算（套管是原路径的局部附件，不随改线
+    # 平移）；故候选视图 sleeve 恒为 null，画面不混用两种半径。
+    sleeve: Optional[SleeveOut] = None
 
 
 class ReroutePreviewOut(BaseModel):
@@ -381,6 +411,8 @@ class PrecheckResponse(BaseModel):
     )
     # 请求带 calibration 时给出标定摘要；省略时为 null（旧字段逐项兼容）。
     calibration: Optional[CalibrationOut] = None
+    # 本次请求生效的加粗套管（回显）；省略时为 null，旧接口逐项兼容。
+    sleeve: Optional[SleeveOut] = None
     # 请求带 reroute 时给一次性改线预览（原线结论仍在本对象顶层）；
     # 省略时为 null，旧接口逐项兼容。
     reroute_preview: Optional[ReroutePreviewOut] = None

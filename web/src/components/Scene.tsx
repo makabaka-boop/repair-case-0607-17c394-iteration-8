@@ -36,6 +36,45 @@ interface View {
   k: number; // mm -> px
 }
 
+/** 各节点累计里程（与后端 cumulative_mileage 同公式，双精度）。 */
+function cumulativeMileages(nodes: { x: number; y: number }[]): number[] {
+  const cum = [0];
+  for (let i = 0; i < nodes.length - 1; i++) {
+    cum.push(cum[i] + Math.hypot(nodes[i + 1].x - nodes[i].x, nodes[i + 1].y - nodes[i].y));
+  }
+  return cum;
+}
+
+/** 里程轴上的闭区间 [m0,m1] → 逐原线段的折线点串（在未舍入里程处切拐点）。 */
+function sleevePolylinePoints(
+  nodes: { x: number; y: number }[],
+  m0: number,
+  m1: number,
+): { x: number; y: number }[] {
+  const cum = cumulativeMileages(nodes);
+  const pointAt = (m: number, seg: number) => {
+    const a = nodes[seg];
+    const b = nodes[seg + 1];
+    const len = cum[seg + 1] - cum[seg];
+    const t = len === 0 ? 0 : Math.min(1, Math.max(0, (m - cum[seg]) / len));
+    return { x: a.x + t * (b.x - a.x), y: a.y + t * (b.y - a.y) };
+  };
+  const pts: { x: number; y: number }[] = [];
+  for (let i = 0; i < nodes.length - 1; i++) {
+    const lo = Math.max(m0, cum[i]);
+    const hi = Math.min(m1, cum[i + 1]);
+    if (lo <= hi) {
+      pts.push(pointAt(lo, i));
+      pts.push(pointAt(hi, i));
+    }
+  }
+  // 跨拐点时相邻两线段各把公共节点追加一次：去掉连续重复点，保持折线
+  // 在拐点处恰好一个顶点（坐标仍取自同一份未舍入里程换算）。
+  return pts.filter(
+    (p, i) => i === 0 || p.x !== pts[i - 1].x || p.y !== pts[i - 1].y,
+  );
+}
+
 function computeView(result: PrecheckResponse): View {
   const xs: number[] = [];
   const ys: number[] = [];
@@ -48,7 +87,6 @@ function computeView(result: PrecheckResponse): View {
     xs.push(c.center.x - c.expanded_radius, c.center.x + c.expanded_radius);
     ys.push(c.center.y - c.expanded_radius, c.center.y + c.expanded_radius);
   });
-
   let minX = Math.min(...xs);
   let maxX = Math.max(...xs);
   let minY = Math.min(...ys);
@@ -125,6 +163,8 @@ export function Scene({ result }: Props) {
 
   // 侵入区间折线片段：与详情列表共用 result.intrusion_intervals 同一数组，
   // 保证“图上高亮”与“文案区间”严格同源。零长相切片段退化为端点圆点。
+  // 套管拆段后同一 (圈, 原线段) 理论上至多一个片段；仍对 testid 计数
+  // 去重，避免任何同 (圈,段) 多片段场景下 DOM id 冲突。
   const intervalFragments: Array<{
     key: string;
     d: string;
@@ -134,6 +174,7 @@ export function Scene({ result }: Props) {
     cy: number;
     testid: string;
   }> = [];
+  const ivIdCount = new Map<string, number>();
   result.intrusion_intervals.forEach((iv, order) => {
     const color = highlightColor(iv.circle_index);
     iv.pieces.forEach((piece) => {
@@ -142,14 +183,18 @@ export function Scene({ result }: Props) {
       const d =
         `M ${sx(piece.entry.x).toFixed(2)} ${sy(piece.entry.y).toFixed(2)} ` +
         `L ${sx(piece.exit.x).toFixed(2)} ${sy(piece.exit.y).toFixed(2)}`;
+      const baseId = `intrusion-c${iv.circle_index}-s${piece.segment_index}`;
+      const seen = ivIdCount.get(baseId) ?? 0;
+      ivIdCount.set(baseId, seen + 1);
       intervalFragments.push({
-        key: `iv-${order}-c${iv.circle_index}-s${piece.segment_index}`,
+        key: `iv-${order}-c${iv.circle_index}-s${piece.segment_index}-${seen}-${piece.start_mileage}`,
         d,
         color,
         zero,
         cx: sx(piece.entry.x),
         cy: sy(piece.entry.y),
-        testid: `intrusion-c${iv.circle_index}-s${piece.segment_index}`,
+        // 单片段保持与旧 DOM 一致的 testid；同 (圈,段) 多片段才加序号。
+        testid: seen === 0 ? baseId : `${baseId}-${seen}`,
       });
     });
   });
@@ -168,6 +213,7 @@ export function Scene({ result }: Props) {
     label: string;
   }> = [];
   const compoundKey = (seg: CompoundIntrusionSegment) => seg.circle_indices.join("-");
+  const cpIdCount = new Map<string, number>();
   result.compound_intrusion_segments.forEach((seg, order) => {
     const ckey = compoundKey(seg);
     seg.pieces.forEach((piece) => {
@@ -176,17 +222,31 @@ export function Scene({ result }: Props) {
       const d =
         `M ${sx(piece.entry.x).toFixed(2)} ${sy(piece.entry.y).toFixed(2)} ` +
         `L ${sx(piece.exit.x).toFixed(2)} ${sy(piece.exit.y).toFixed(2)}`;
+      const baseId = `compound-c${ckey}-s${piece.segment_index}`;
+      const seen = cpIdCount.get(baseId) ?? 0;
+      cpIdCount.set(baseId, seen + 1);
       compoundFragments.push({
-        key: `cp-${order}-c${ckey}-s${piece.segment_index}`,
+        key: `cp-${order}-c${ckey}-s${piece.segment_index}-${seen}-${piece.start_mileage}`,
         d,
         zero,
         cx: sx(piece.entry.x),
         cy: sy(piece.entry.y),
-        testid: `compound-c${ckey}-s${piece.segment_index}`,
+        testid: seen === 0 ? baseId : `${baseId}-${seen}`,
         label: `圈 ${seg.circle_indices.join("/")}`,
       });
     });
   });
+
+  // 套管加粗段：与详情/API 共用 result.sleeve 同一份字段描画（逐原线段
+  // 切拐点）。候选改线视图 sleeve 为 null，绝不画出旧套管。
+  const sleeve = result.sleeve ?? null;
+  const sleevePoints = sleeve
+    ? sleevePolylinePoints(result.nodes, sleeve.start_mileage, sleeve.end_mileage)
+    : [];
+  const sleeveD = sleevePoints
+    .map((p, i) => `${i === 0 ? "M" : "L"} ${sx(p.x).toFixed(2)} ${sy(p.y).toFixed(2)}`)
+    .join(" ");
+  const sleevePx = sleeve ? Math.max(2, sr(sleeve.outer_radius)) : 0;
 
   // 图形高亮必须与接口的首个碰撞及明细顺序保持一致。
   const first = result.first_collision;
@@ -232,6 +292,42 @@ export function Scene({ result }: Props) {
       {/* 电缆折线路径（线宽体现电缆半径） */}
       <path d={pathD} className="cable-path" strokeWidth={cablePx} fill="none" />
       <path d={pathD} className="cable-axis" strokeWidth={1} fill="none" />
+
+      {/* 加粗接头套管：与区间详情 / API 同一份 sleeve 字段，逐原线段高亮，
+          线宽体现外半径；零长套管（非法）不会出现。 */}
+      {sleeve && sleevePoints.length > 0 && (
+        <g data-testid="sleeve-layer">
+          <path
+            d={sleeveD}
+            className="sleeve-band"
+            strokeWidth={sleevePx}
+            fill="none"
+            data-testid="sleeve-section"
+          >
+            <title>
+              {`套管里程 ${sleeve.start_mileage} → ${sleeve.end_mileage}（外半径 ${sleeve.outer_radius} mm）`}
+            </title>
+          </path>
+          {sleevePoints[0] && (
+            <circle
+              cx={sx(sleevePoints[0].x)}
+              cy={sy(sleevePoints[0].y)}
+              r={3.5}
+              className="sleeve-boundary"
+              data-testid="sleeve-boundary-start"
+            />
+          )}
+          {sleevePoints[sleevePoints.length - 1] && (
+            <circle
+              cx={sx(sleevePoints[sleevePoints.length - 1].x)}
+              cy={sy(sleevePoints[sleevePoints.length - 1].y)}
+              r={3.5}
+              className="sleeve-boundary"
+              data-testid="sleeve-boundary-end"
+            />
+          )}
+        </g>
+      )}
 
       {/* 连续侵入区间高亮：按 interval 同数组逐片段绘制折线，
           颜色区分禁入圈；零长相切点画为小圆点。 */}

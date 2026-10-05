@@ -14,6 +14,7 @@ from .geometry import (
     Collision,
     CompoundIntrusionSegment,
     IntrusionInterval,
+    SleeveSpec,
     analyze_path_full,
 )
 from .reroute import (
@@ -24,6 +25,7 @@ from .reroute import (
     diff_risks,
     validate_reroute,
 )
+from .sleeve import build_sleeve_spec, validate_sleeve
 from .schemas import (
     CalibrationOut,
     CandidateRouteOut,
@@ -41,6 +43,7 @@ from .schemas import (
     ReroutePreviewOut,
     RerouteRangeOut,
     RiskEventOut,
+    SleeveOut,
 )
 
 app = FastAPI(title="隧道电缆绕孔预检器", version="1.0.0")
@@ -141,7 +144,7 @@ def _collision_views(
             expanded_radius=round3(c.expanded_radius),
             circle_center=rpt(circles[c.circle_index][0]),
             circle_radius=round3(circles[c.circle_index][1]),
-            cable_radius=round3(cable_radius),
+            cable_radius=round3(c.cable_radius),
         )
         for c in raw
     ]
@@ -213,8 +216,14 @@ def _route_view(
     intervals: List[IntrusionInterval],
     compounds: List[CompoundIntrusionSegment],
     rpt,
+    sleeve_view: Optional[SleeveOut] = None,
 ) -> Dict[str, Any]:
-    """一套几何结论 → 序列化字段（原线/候选线完全同源，避免两条链路漂移）。"""
+    """一套几何结论 → 序列化字段（原线/候选线完全同源，避免两条链路漂移）。
+
+    ``sleeve_view`` 仅原线（真正携带套管的路径）给出；候选线统一半径，
+    传 None——API、区间详情与 SVG 从同一个 sleeve 字段读取，绝不混用
+    新旧半径。
+    """
     collision_views = _collision_views(raw, circles, cable_radius, rpt)
     return {
         "feasible": len(collision_views) == 0,
@@ -226,6 +235,7 @@ def _route_view(
         "collisions": collision_views,
         "intrusion_intervals": _interval_views(intervals, rpt),
         "compound_intrusion_segments": _compound_views(compounds, rpt),
+        "sleeve": sleeve_view,
     }
 
 
@@ -333,6 +343,37 @@ def precheck(payload: PrecheckRequest) -> PrecheckResponse:
             replacement,
         )
 
+    # 可选加粗套管：范围非空、位于路径内、外半径 ≥ 电缆半径；任一不
+    # 满足都在几何计算**之前**以字段级 422 整次拒绝（不输出部分风险）。
+    # 套管按原路径里程定义，只作用于原线；候选改线统一按普通半径计算。
+    sleeve_spec: Optional[SleeveSpec] = None
+    sleeve_view: Optional[SleeveOut] = None
+    if payload.sleeve is not None:
+        sleeve_errors = validate_sleeve(
+            nodes=nodes,
+            cable_radius=payload.cable_radius,
+            start_mileage=payload.sleeve.start_mileage,
+            end_mileage=payload.sleeve.end_mileage,
+            outer_radius=payload.sleeve.outer_radius,
+        )
+        if sleeve_errors:
+            raise RequestValidationError(
+                errors=[
+                    {"loc": ("body",) + loc, "msg": f"Value error, {msg}", "type": "value_error"}
+                    for loc, msg in sleeve_errors
+                ]
+            )
+        sleeve_spec = build_sleeve_spec(
+            start_mileage=payload.sleeve.start_mileage,
+            end_mileage=payload.sleeve.end_mileage,
+            outer_radius=payload.sleeve.outer_radius,
+        )
+        sleeve_view = SleeveOut(
+            start_mileage=round3(sleeve_spec.start_mileage),
+            end_mileage=round3(sleeve_spec.end_mileage),
+            outer_radius=round3(sleeve_spec.outer_radius),
+        )
+
     def rpt(p) -> PointOut:
         return PointOut(x=round3(p[0]), y=round3(p[1]))
 
@@ -344,9 +385,17 @@ def precheck(payload: PrecheckRequest) -> PrecheckResponse:
         nodes=nodes,
         circles=circles,
         cable_radius=payload.cable_radius,
+        sleeve=sleeve_spec,
     )
     original_fields = _route_view(
-        nodes, circles, payload.cable_radius, raw, intervals, compounds, rpt
+        nodes,
+        circles,
+        payload.cable_radius,
+        raw,
+        intervals,
+        compounds,
+        rpt,
+        sleeve_view=sleeve_view,
     )
 
     # ---- 候选线：同一标定后的禁入圈、同一套精确几何规则再算一次 ----

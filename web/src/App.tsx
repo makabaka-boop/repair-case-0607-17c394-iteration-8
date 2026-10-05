@@ -61,6 +61,13 @@ const emptyReroute = (): RerouteDraft => ({
   ],
 });
 
+const emptySleeve = () => ({
+  enabled: false,
+  startMileage: "40",
+  endMileage: "60",
+  outerRadius: "8",
+});
+
 const initialDraft: FormDraft = {
   cableRadius: "5",
   nodes: [
@@ -71,6 +78,7 @@ const initialDraft: FormDraft = {
   calibrationEnabled: false,
   maxRmsError: "1",
   calibrationPairs: [emptyPair(), emptyPair()],
+  sleeve: emptySleeve(),
   reroute: emptyReroute(),
 };
 
@@ -323,6 +331,10 @@ export function App() {
 
   const updateReroute = (patch: Partial<RerouteDraft>) => {
     setDraft((d) => ({ ...d, reroute: { ...d.reroute, ...patch } }));
+  };
+
+  const updateSleeve = (patch: Partial<FormDraft["sleeve"]>) => {
+    setDraft((d) => ({ ...d, sleeve: { ...d.sleeve, ...patch } }));
   };
   const updateReroutePoint = (i: number, patch: Partial<NodeDraft>) => {
     setDraft((d) => ({
@@ -856,6 +868,73 @@ export function App() {
 
           <section>
             <div className="row-head">
+              <h2>加粗接头套管（可选）：原路径累计里程区间</h2>
+              <label className="calibration-toggle">
+                <input
+                  type="checkbox"
+                  data-testid="sleeve-enabled"
+                  checked={draft.sleeve.enabled}
+                  onChange={(e) => {
+                    updateSleeve({ enabled: e.target.checked });
+                    if (e.target.checked) setErrors({});
+                  }}
+                />
+                启用套管预检
+              </label>
+            </div>
+            {draft.sleeve.enabled && (
+              <div className="calibration-editor sleeve-editor" data-testid="sleeve-editor">
+                <p className="hint">
+                  套管按<b>原路径累计里程</b>给出非空闭区间（允许小数毫米，必须位于路径
+                  [0, 路径总长] 内），区间内按较大的外半径与扩张圈求交，边界点按大半径
+                  裁决；外半径不得小于电缆半径。
+                </p>
+                <div className="reroute-range">
+                  <NumInput
+                    value={draft.sleeve.startMileage}
+                    testid="sleeve-start"
+                    ariaLabel="套管起点累计里程"
+                    invalid={hasErr(errors, "sleeve.start_mileage")}
+                    onChange={(v) => updateSleeve({ startMileage: v })}
+                  />
+                  <span className="row-index">至</span>
+                  <NumInput
+                    value={draft.sleeve.endMileage}
+                    testid="sleeve-end"
+                    ariaLabel="套管终点累计里程"
+                    invalid={hasErr(errors, "sleeve.end_mileage")}
+                    onChange={(v) => updateSleeve({ endMileage: v })}
+                  />
+                  <span className="hint">累计里程（毫米）</span>
+                </div>
+                <div className="calibration-threshold">
+                  <span className="row-index">套管外半径（毫米，≥ 电缆半径）</span>
+                  <NumInput
+                    value={draft.sleeve.outerRadius}
+                    testid="sleeve-radius"
+                    ariaLabel="套管外半径（毫米）"
+                    invalid={hasErr(errors, "sleeve.outer_radius")}
+                    onChange={(v) => updateSleeve({ outerRadius: v })}
+                  />
+                </div>
+                {(err(errors, "sleeve.start_mileage") ||
+                  err(errors, "sleeve.end_mileage")) && (
+                  <p className="field-error" data-testid="err-sleeve-range">
+                    {err(errors, "sleeve.start_mileage") ??
+                      err(errors, "sleeve.end_mileage")}
+                  </p>
+                )}
+                {err(errors, "sleeve.outer_radius") && (
+                  <p className="field-error" data-testid="err-sleeve-radius">
+                    {err(errors, "sleeve.outer_radius")}
+                  </p>
+                )}
+              </div>
+            )}
+          </section>
+
+          <section>
+            <div className="row-head">
               <h2>一次性改线预览（可选）：替换连续节点区间</h2>
               <label className="calibration-toggle">
                 <input
@@ -1192,6 +1271,11 @@ export function App() {
               <p className="legend">
                 <span className="lg lg-solid" /> 禁入圈（孔半径）
                 <span className="lg lg-dashed" /> 扩张安全圈（孔半径+电缆半径）
+                {viewResult.sleeve && (
+                  <>
+                    <span className="lg lg-sleeve" /> 加粗接头套管
+                  </>
+                )}
                 <span className="lg lg-intrusion" /> 连续侵入区间
                 {viewResult.compound_intrusion_segments.length > 0 && (
                   <>

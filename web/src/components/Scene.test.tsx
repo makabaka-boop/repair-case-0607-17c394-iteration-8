@@ -317,4 +317,41 @@ describe("Scene", () => {
     expect(frag.tagName.toLowerCase()).toBe("path");
     expect(frag.getAttribute("stroke-dasharray")).not.toBeNull();
   });
+
+  it("套管：按 result.sleeve 同一字段在跨拐点路径上描画加粗段与两个边界点", () => {
+    const result: PrecheckResponse = {
+      feasible: false,
+      cable_radius: 2,
+      nodes: [
+        { x: 0, y: 0 },
+        { x: 10, y: 0 },
+        { x: 10, y: 10 },
+      ],
+      circles: [{ center: { x: 10, y: 5 }, radius: 1, expanded_radius: 9 }],
+      collision_count: 1,
+      first_collision: null,
+      collisions: [],
+      intrusion_intervals: [],
+      compound_intrusion_segments: [],
+      // 里程 5（第一段内部）→ 15（第二段内部），跨拐点里程 10
+      sleeve: { start_mileage: 5, end_mileage: 15, outer_radius: 8 },
+    };
+    const { getByTestId } = render(<Scene result={result} />);
+    const band = getByTestId("sleeve-section");
+    expect(band.tagName.toLowerCase()).toBe("path");
+    // 折线必须在拐点 (10,0) 处折一次：M 起点 → L 拐点 → L 终点（3 段命令）
+    const d = band.getAttribute("d") ?? "";
+    expect(d.split("L")).toHaveLength(3);
+    expect(getByTestId("sleeve-boundary-start")).toBeInTheDocument();
+    expect(getByTestId("sleeve-boundary-end")).toBeInTheDocument();
+  });
+
+  it("无 sleeve（候选视图/未提交）时不描画套管层，避免新旧半径混用", () => {
+    const result: PrecheckResponse = {
+      ...orderedCollisionsResult,
+      sleeve: null,
+    };
+    const { queryByTestId } = render(<Scene result={result} />);
+    expect(queryByTestId("sleeve-layer")).not.toBeInTheDocument();
+  });
 });

@@ -77,6 +77,20 @@ export interface CalibrationPayload {
   max_rms_error: number;
 }
 
+// ---------- 可选加粗接头套管 ----------
+
+export interface SleevePayload {
+  start_mileage: number;
+  end_mileage: number;
+  outer_radius: number;
+}
+
+export interface SleeveView {
+  start_mileage: number;
+  end_mileage: number;
+  outer_radius: number;
+}
+
 // ---------- 一次性改线预览 ----------
 
 export interface ReroutePayload {
@@ -138,6 +152,8 @@ interface PrecheckResponseBase {
   collisions: Collision[];
   intrusion_intervals: IntrusionInterval[];
   compound_intrusion_segments: CompoundIntrusionSegment[];
+  // 原线携带生效套管时回显；候选改线视图恒为 null（统一半径）。
+  sleeve?: SleeveView | null;
 }
 
 export interface PrecheckResponse extends PrecheckResponseBase {
@@ -152,6 +168,7 @@ export interface PrecheckPayload {
   cable_radius: number;
   circles: Array<Point & { radius: number }>;
   calibration?: CalibrationPayload;
+  sleeve?: SleevePayload;
   reroute?: ReroutePayload;
 }
 
